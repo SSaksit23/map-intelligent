@@ -19,14 +19,16 @@ interface TripMapProps {
   routes: RouteInfo[];
   selectedLocationId?: string | null;
   onLocationClick?: (id: string) => void;
+  visibleDays?: Set<number>;
 }
 
 type MapStyleType = "street" | "satellite" | "terrain";
 
 const mapStyles: Record<MapStyleType, { light: string; dark: string; label: string; icon: typeof MapIcon }> = {
   street: {
-    light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-    dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    // Using Voyager style for better visibility in both themes
+    light: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+    dark: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
     label: "Street",
     icon: MapIcon,
   },
@@ -38,9 +40,10 @@ const mapStyles: Record<MapStyleType, { light: string; dark: string; label: stri
     icon: Satellite,
   },
   terrain: {
-    light: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-    dark: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
-    label: "Terrain",
+    // Dark Matter style for a sleek dark map
+    light: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    label: "Dark",
     icon: Mountain,
   },
 };
@@ -50,27 +53,43 @@ export function TripMap({
   routes,
   selectedLocationId,
   onLocationClick,
+  visibleDays,
 }: TripMapProps) {
   const mapRef = useRef<MapLibreGL.Map | null>(null);
   const [showLabels, setShowLabels] = useState(true);
   const [currentStyle, setCurrentStyle] = useState<MapStyleType>("street");
   const [showStyleMenu, setShowStyleMenu] = useState(false);
 
-  // Calculate center based on locations
-  const center: [number, number] = locations.length > 0
+  // Filter locations based on visible days
+  const filteredLocations = visibleDays 
+    ? locations.filter(loc => visibleDays.has(loc.day || 1))
+    : locations;
+
+  // Filter routes - only show routes where both start and end locations are visible
+  const filteredRoutes = visibleDays
+    ? routes.filter((_, index) => {
+        const startLoc = locations[index];
+        const endLoc = locations[index + 1];
+        if (!startLoc || !endLoc) return false;
+        return visibleDays.has(startLoc.day || 1) && visibleDays.has(endLoc.day || 1);
+      })
+    : routes;
+
+  // Calculate center based on filtered locations
+  const center: [number, number] = filteredLocations.length > 0
     ? [
-        locations.reduce((sum, loc) => sum + loc.coordinates.lng, 0) / locations.length,
-        locations.reduce((sum, loc) => sum + loc.coordinates.lat, 0) / locations.length,
+        filteredLocations.reduce((sum, loc) => sum + loc.coordinates.lng, 0) / filteredLocations.length,
+        filteredLocations.reduce((sum, loc) => sum + loc.coordinates.lat, 0) / filteredLocations.length,
       ]
     : [0, 20]; // Default center
 
-  // Calculate appropriate zoom level based on locations spread
+  // Calculate appropriate zoom level based on filtered locations spread
   const calculateZoom = () => {
-    if (locations.length === 0) return 2;
-    if (locations.length === 1) return 12;
+    if (filteredLocations.length === 0) return 2;
+    if (filteredLocations.length === 1) return 12;
 
-    const lngs = locations.map((l) => l.coordinates.lng);
-    const lats = locations.map((l) => l.coordinates.lat);
+    const lngs = filteredLocations.map((l) => l.coordinates.lng);
+    const lats = filteredLocations.map((l) => l.coordinates.lat);
     const lngSpread = Math.max(...lngs) - Math.min(...lngs);
     const latSpread = Math.max(...lats) - Math.min(...lats);
     const maxSpread = Math.max(lngSpread, latSpread);
@@ -86,10 +105,10 @@ export function TripMap({
     return 12;
   };
 
-  // Fit bounds when locations change
+  // Fit bounds when filtered locations change
   useEffect(() => {
-    if (mapRef.current && locations.length > 0) {
-      const bounds = locations.reduce(
+    if (mapRef.current && filteredLocations.length > 0) {
+      const bounds = filteredLocations.reduce(
         (acc, loc) => {
           acc.minLng = Math.min(acc.minLng, loc.coordinates.lng);
           acc.maxLng = Math.max(acc.maxLng, loc.coordinates.lng);
@@ -108,12 +127,28 @@ export function TripMap({
         { padding: 80, duration: 1000, maxZoom: 14 }
       );
     }
-  }, [locations]);
+  }, [filteredLocations]);
 
-  // Get day color for route (use the starting location's day)
-  const getRouteColor = (routeIndex: number) => {
-    if (routeIndex < locations.length) {
-      return getDayColor(locations[routeIndex]?.day).bg;
+  // Get day color for route (use the starting location's day from original locations array)
+  const getRouteColor = (filteredRouteIndex: number) => {
+    // Find the original route index
+    let originalIndex = 0;
+    let filteredCount = 0;
+    
+    for (let i = 0; i < routes.length; i++) {
+      const startLoc = locations[i];
+      const endLoc = locations[i + 1];
+      if (startLoc && endLoc && visibleDays?.has(startLoc.day || 1) && visibleDays?.has(endLoc.day || 1)) {
+        if (filteredCount === filteredRouteIndex) {
+          originalIndex = i;
+          break;
+        }
+        filteredCount++;
+      }
+    }
+    
+    if (originalIndex < locations.length) {
+      return getDayColor(locations[originalIndex]?.day).bg;
     }
     return "#6366f1";
   };
@@ -134,7 +169,7 @@ export function TripMap({
         <MapControls position="bottom-right" showZoom showLocate showFullscreen />
 
         {/* Render routes with day-based colors */}
-        {routes.map((route, index) => (
+        {filteredRoutes.map((route, index) => (
           <MapRoute
             key={`route-${index}`}
             coordinates={route.coordinates}
@@ -145,7 +180,9 @@ export function TripMap({
         ))}
 
         {/* Render location markers with day-based colors */}
-        {locations.map((location, index) => {
+        {filteredLocations.map((location) => {
+          // Get the global index for numbering
+          const globalIndex = locations.findIndex(l => l.id === location.id);
           const dayColor = getDayColor(location.day);
           const isHotel = location.type === "hotel";
 
@@ -167,7 +204,7 @@ export function TripMap({
                   `}
                   style={{ backgroundColor: dayColor.bg }}
                 >
-                  {isHotel ? "🏨" : index + 1}
+                  {isHotel ? "🏨" : globalIndex + 1}
                 </div>
                 {showLabels && (
                   <MarkerLabel position="bottom">

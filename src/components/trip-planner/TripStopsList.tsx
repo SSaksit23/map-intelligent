@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight } from "lucide-react";
+import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import type { TripLocation, RouteInfo } from "@/types/trip";
 
 interface TripStopsListProps {
@@ -17,7 +18,11 @@ interface TripStopsListProps {
   onDayChange: (locationId: string, newDay: number) => void;
   onAddDay: () => void;
   onRemoveDay: (day: number) => void;
+  onAddLocationToDay: (query: string, day: number) => void;
   days: number[];
+  isSearching?: boolean;
+  visibleDays: Set<number>;
+  onVisibleDaysChange: (days: Set<number>) => void;
 }
 
 const typeLabels: Record<string, string> = {
@@ -82,12 +87,40 @@ export function TripStopsList({
   onDayChange,
   onAddDay,
   onRemoveDay,
+  onAddLocationToDay,
   days,
+  isSearching = false,
+  visibleDays,
+  onVisibleDaysChange,
 }: TripStopsListProps) {
   const [collapsedDays, setCollapsedDays] = useState<Set<number>>(new Set());
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
   const [dragOverDay, setDragOverDay] = useState<number | null>(null);
+  const [dayInputs, setDayInputs] = useState<Record<number, string>>({});
+  const [activeDayInput, setActiveDayInput] = useState<number | null>(null);
   const dragCounter = useRef(0);
+
+  const handleDayInputChange = (day: number, value: string) => {
+    setDayInputs(prev => ({ ...prev, [day]: value }));
+  };
+
+  const handleDayInputSubmit = (day: number) => {
+    const query = dayInputs[day]?.trim();
+    if (query) {
+      onAddLocationToDay(query, day);
+      setDayInputs(prev => ({ ...prev, [day]: "" }));
+      setActiveDayInput(null);
+    }
+  };
+
+  const handleDayInputKeyDown = (e: React.KeyboardEvent, day: number) => {
+    if (e.key === "Enter") {
+      handleDayInputSubmit(day);
+    } else if (e.key === "Escape") {
+      setActiveDayInput(null);
+      setDayInputs(prev => ({ ...prev, [day]: "" }));
+    }
+  };
 
   const toggleDayCollapse = (day: number) => {
     setCollapsedDays(prev => {
@@ -99,6 +132,23 @@ export function TripStopsList({
       }
       return newSet;
     });
+  };
+
+  const toggleDayVisibility = (day: number) => {
+    const newSet = new Set(visibleDays);
+    if (newSet.has(day)) {
+      // Don't allow hiding all days
+      if (newSet.size > 1) {
+        newSet.delete(day);
+      }
+    } else {
+      newSet.add(day);
+    }
+    onVisibleDaysChange(newSet);
+  };
+
+  const showAllDays = () => {
+    onVisibleDaysChange(new Set(days));
   };
 
   if (locations.length === 0 && days.length <= 1) {
@@ -227,10 +277,50 @@ export function TripStopsList({
         </div>
       )}
 
+      {/* Day Filter */}
+      {days.length > 1 && (
+        <div className="p-2 border-b border-border/50 flex-shrink-0">
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-[10px] text-muted-foreground mr-1">Filter:</span>
+            {days.map(day => {
+              const dayColor = getDayColor(day);
+              const isVisible = visibleDays.has(day);
+              return (
+                <button
+                  key={day}
+                  onClick={() => toggleDayVisibility(day)}
+                  className={`
+                    px-2 py-1 rounded-md text-[10px] font-medium transition-all
+                    ${isVisible 
+                      ? "text-white" 
+                      : "opacity-40 hover:opacity-70"
+                    }
+                  `}
+                  style={{ 
+                    backgroundColor: isVisible ? dayColor.bg : "transparent",
+                    border: `1px solid ${dayColor.bg}`
+                  }}
+                >
+                  Day {day}
+                </button>
+              );
+            })}
+            {visibleDays.size < days.length && (
+              <button
+                onClick={showAllDays}
+                className="px-2 py-1 rounded-md text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Show All
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Stops List by Day - Scrollable Container */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="p-3 space-y-3">
-          {days.map((day) => {
+          {days.filter(day => visibleDays.has(day)).map((day) => {
             const dayColor = getDayColor(day);
             const dayLocations = locationsByDay[day] || [];
             const isCollapsed = collapsedDays.has(day);
@@ -294,8 +384,8 @@ export function TripStopsList({
                 {!isCollapsed && (
                   <div className="p-2 pt-0 space-y-1">
                     {dayLocations.length === 0 ? (
-                      <div className="text-center py-4 text-xs text-muted-foreground">
-                        Drag items here or search to add stops
+                      <div className="text-center py-2 text-[10px] text-muted-foreground">
+                        No stops yet - add below or drag items here
                       </div>
                     ) : (
                       dayLocations.map((location) => {
@@ -397,6 +487,56 @@ export function TripStopsList({
                         );
                       })
                     )}
+
+                    {/* Add Location Input - At Bottom of Day */}
+                    <div className="mt-2 pt-2 border-t border-border/30">
+                      {activeDayInput === day ? (
+                        <div className="flex gap-1">
+                          <div className="relative flex-1">
+                            <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
+                            <Input
+                              type="text"
+                              placeholder={`Add location to Day ${day}...`}
+                              value={dayInputs[day] || ""}
+                              onChange={(e) => handleDayInputChange(day, e.target.value)}
+                              onKeyDown={(e) => handleDayInputKeyDown(e, day)}
+                              onBlur={() => {
+                                setTimeout(() => {
+                                  if (!dayInputs[day]?.trim()) {
+                                    setActiveDayInput(null);
+                                  }
+                                }, 200);
+                              }}
+                              autoFocus
+                              className="h-8 pl-7 pr-2 text-xs bg-background/60"
+                              disabled={isSearching}
+                            />
+                            {isSearching && activeDayInput === day && (
+                              <Loader2 className="absolute right-2 top-1/2 -translate-y-1/2 size-3 animate-spin" />
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            className="h-8 px-2"
+                            onClick={() => handleDayInputSubmit(day)}
+                            disabled={!dayInputs[day]?.trim() || isSearching}
+                            style={{ backgroundColor: dayColor.bg }}
+                          >
+                            <Plus className="size-3" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="w-full h-7 text-xs text-muted-foreground hover:text-foreground justify-center gap-1.5 border border-dashed border-border/50 hover:border-border"
+                          onClick={() => setActiveDayInput(day)}
+                        >
+                          <Plus className="size-3" />
+                          Add stop to Day {day}
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

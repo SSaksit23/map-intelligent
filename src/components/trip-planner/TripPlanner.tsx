@@ -19,6 +19,7 @@ export function TripPlanner() {
   const [aiMessage, setAiMessage] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [days, setDays] = useState<number[]>([1]);
+  const [visibleDays, setVisibleDays] = useState<Set<number>>(new Set([1]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mapExpanded, setMapExpanded] = useState(false);
 
@@ -128,6 +129,8 @@ export function TripPlanner() {
         // Update days array to include all days from the new locations
         const newDays = [...new Set([...days, ...newLocations.map(l => l.day || 1)])].sort((a, b) => a - b);
         setDays(newDays);
+        // Also make new days visible
+        setVisibleDays(prev => new Set([...prev, ...newLocations.map(l => l.day || 1)]));
 
         const allLocations = [...locations, ...newLocations];
         setLocations(allLocations);
@@ -145,6 +148,54 @@ export function TripPlanner() {
       setIsLoading(false);
     }
   }, [locations, days, calculateRoutes]);
+
+  // Add location to a specific day using AI
+  const handleAddLocationToDay = useCallback(async (query: string, targetDay: number) => {
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          query: `Find this location: ${query}. Return only this single location.`,
+          context: `Adding to Day ${targetDay} of trip`
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to get AI response");
+      }
+
+      const data: GeminiResponse = await response.json();
+
+      if (data.locations && data.locations.length > 0) {
+        // Take only the first location and assign it to the target day
+        const loc = data.locations[0];
+        const newLocation: TripLocation = {
+          id: generateId(),
+          name: loc.name,
+          description: loc.description,
+          address: loc.address,
+          coordinates: loc.coordinates,
+          type: loc.type as TripLocation["type"],
+          day: targetDay,
+          order: locations.filter(l => l.day === targetDay).length,
+        };
+
+        const allLocations = [...locations, newLocation];
+        // Sort by day
+        allLocations.sort((a, b) => (a.day || 1) - (b.day || 1));
+        setLocations(allLocations);
+        setSelectedLocationId(newLocation.id);
+        await calculateRoutes(allLocations);
+      }
+    } catch (error) {
+      console.error("Add location error:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [locations, calculateRoutes]);
 
   // Remove a location
   const handleLocationRemove = useCallback(async (id: string) => {
@@ -184,7 +235,9 @@ export function TripPlanner() {
   // Add a new day
   const handleAddDay = useCallback(() => {
     const maxDay = Math.max(...days, 0);
-    setDays([...days, maxDay + 1]);
+    const newDay = maxDay + 1;
+    setDays([...days, newDay]);
+    setVisibleDays(prev => new Set([...prev, newDay]));
   }, [days]);
 
   // Remove a day (only if empty)
@@ -195,8 +248,17 @@ export function TripPlanner() {
     const newDays = days.filter(d => d !== dayToRemove);
     if (newDays.length === 0) {
       setDays([1]);
+      setVisibleDays(new Set([1]));
     } else {
       setDays(newDays);
+      setVisibleDays(prev => {
+        const newVisible = new Set(prev);
+        newVisible.delete(dayToRemove);
+        if (newVisible.size === 0) {
+          return new Set(newDays);
+        }
+        return newVisible;
+      });
     }
   }, [days, locations]);
 
@@ -288,7 +350,11 @@ export function TripPlanner() {
               onDayChange={handleDayChange}
               onAddDay={handleAddDay}
               onRemoveDay={handleRemoveDay}
+              onAddLocationToDay={handleAddLocationToDay}
               days={days}
+              isSearching={isLoading}
+              visibleDays={visibleDays}
+              onVisibleDaysChange={setVisibleDays}
             />
           </div>
         </aside>
@@ -335,6 +401,7 @@ export function TripPlanner() {
             routes={routes}
             selectedLocationId={selectedLocationId}
             onLocationClick={setSelectedLocationId}
+            visibleDays={visibleDays}
           />
         </main>
       </div>
