@@ -1,11 +1,12 @@
-# Stage 1: Install dependencies
+# Stage 1: Install ALL dependencies (including devDependencies for build)
 FROM node:20-alpine AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 # Copy package files
 COPY package.json package-lock.json ./
-RUN npm ci --only=production
+# Install ALL dependencies (need TypeScript for build)
+RUN npm ci
 
 # Stage 2: Build the application
 FROM node:20-alpine AS builder
