@@ -16,6 +16,63 @@ export interface RouteInfo {
   coordinates: [number, number][];
   duration: number; // seconds
   distance: number; // meters
+  isFlight?: boolean; // Whether this is a flight route
+}
+
+export interface FlightInfo {
+  id: string;
+  flightNumber: string;
+  airline: string;
+  departure: {
+    airport: string;
+    iata: string;
+    icao?: string;
+    city: string;
+    country?: string;
+    coordinates: { lat: number; lng: number };
+    time?: string; // HH:MM format
+    scheduledTime?: string;
+  };
+  arrival: {
+    airport: string;
+    iata: string;
+    icao?: string;
+    city: string;
+    country?: string;
+    coordinates: { lat: number; lng: number };
+    time?: string; // HH:MM format
+    scheduledTime?: string;
+  };
+  curvedPath?: [number, number][]; // Pre-calculated curved flight path
+  status: string;
+  aircraft?: string;
+  duration?: number;
+  distance?: number; // km
+  day?: number;
+}
+
+export interface TrainInfo {
+  id: string;
+  trainNumber: string;
+  trainType: "high-speed" | "normal" | "metro" | "other";
+  operator?: string;
+  departure: {
+    station: string;
+    city: string;
+    country?: string;
+    coordinates: { lat: number; lng: number };
+    time?: string; // HH:MM format
+  };
+  arrival: {
+    station: string;
+    city: string;
+    country?: string;
+    coordinates: { lat: number; lng: number };
+    time?: string; // HH:MM format
+  };
+  duration?: number; // seconds
+  distance?: number; // km
+  day?: number;
 }
 
 export interface TripData {

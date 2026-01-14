@@ -1,20 +1,23 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import { Download, FileText, X, Printer, Copy, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { TripLocation, RouteInfo } from "@/types/trip";
+import type { TripLocation, RouteInfo, FlightInfo } from "@/types/trip";
 import { getDayColor } from "./TripStopsList";
+import { calculateDistance } from "@/lib/utils";
 
 interface ExportItineraryProps {
   locations: TripLocation[];
   routes: RouteInfo[];
+  flights?: FlightInfo[];
   days: number[];
   isOpen: boolean;
   onClose: () => void;
 }
 
 function formatDuration(seconds: number): string {
+  if (!seconds || seconds <= 0) return "0 min";
   const mins = Math.round(seconds / 60);
   if (mins < 60) return `${mins} min`;
   const hours = Math.floor(mins / 60);
@@ -23,13 +26,22 @@ function formatDuration(seconds: number): string {
 }
 
 function formatDistance(meters: number): string {
+  if (!meters || meters <= 0) return "0 m";
   if (meters < 1000) return `${Math.round(meters)} m`;
   return `${(meters / 1000).toFixed(1)} km`;
+}
+
+// Estimate flight duration based on distance (avg 800 km/h for commercial flights)
+function estimateFlightDuration(distanceKm: number): number {
+  const avgSpeedKmH = 800;
+  const hours = distanceKm / avgSpeedKmH;
+  return hours * 3600; // Return in seconds
 }
 
 export function ExportItinerary({ 
   locations, 
   routes, 
+  flights = [],
   days, 
   isOpen, 
   onClose,
@@ -46,17 +58,95 @@ export function ExportItinerary({
     return acc;
   }, {} as Record<number, TripLocation[]>);
 
-  // Calculate total stats
-  const totalDistance = routes.reduce((sum, r) => sum + r.distance, 0);
-  const totalDuration = routes.reduce((sum, r) => sum + r.duration, 0);
+  // Build a map of flight connections for quick lookup
+  const flightConnections = useMemo(() => {
+    const map = new Map<string, { distance: number; duration: number; isFlight: boolean }>();
+    flights.forEach(flight => {
+      const depId = `${flight.id}-dep`;
+      const arrId = `${flight.id}-arr`;
+      const distance = calculateDistance(flight.departure.coordinates, flight.arrival.coordinates);
+      const duration = flight.duration || estimateFlightDuration(distance / 1000);
+      map.set(`${depId}->${arrId}`, { distance, duration, isFlight: true });
+    });
+    return map;
+  }, [flights]);
 
-  // Get route info for a location (route TO the next location)
-  const getRouteAfter = (locationId: string) => {
-    const index = locations.findIndex(l => l.id === locationId);
-    if (index >= 0 && index < routes.length) {
-      return routes[index];
+  // Get route info between two consecutive locations
+  const getRouteBetween = (fromLoc: TripLocation, toLoc: TripLocation) => {
+    // Check if this is a flight connection
+    const flightKey = `${fromLoc.id}->${toLoc.id}`;
+    const flightRoute = flightConnections.get(flightKey);
+    if (flightRoute) {
+      return flightRoute;
     }
+    
+    // For airports on same day, calculate direct distance (they'd fly)
+    if (fromLoc.type === 'airport' && toLoc.type === 'airport') {
+      const distance = calculateDistance(fromLoc.coordinates, toLoc.coordinates);
+      return { 
+        distance: distance === Infinity ? 0 : distance, 
+        duration: estimateFlightDuration((distance === Infinity ? 0 : distance) / 1000),
+        isFlight: true 
+      };
+    }
+    
+    // For regular locations, find matching land route
+    const fromIndex = locations.findIndex(l => l.id === fromLoc.id);
+    const toIndex = locations.findIndex(l => l.id === toLoc.id);
+    
+    // Find a land route that could connect these (by counting non-skipped pairs)
+    const landRoutes = routes.filter(r => !r.isFlight);
+    let routeIndex = 0;
+    for (let i = 0; i < locations.length - 1; i++) {
+      const loc1 = locations[i];
+      const loc2 = locations[i + 1];
+      
+      // Skip airports and different days (matching the skip logic in TripPlanner)
+      if (loc1.type === 'airport' || loc2.type === 'airport') continue;
+      if (loc1.day !== loc2.day) continue;
+      
+      // Check distance threshold
+      const dist = calculateDistance(loc1.coordinates, loc2.coordinates);
+      if (dist > 1000000) continue; // > 1000 km
+      
+      if (i === fromIndex && i + 1 === toIndex && routeIndex < landRoutes.length) {
+        return { ...landRoutes[routeIndex], isFlight: false };
+      }
+      routeIndex++;
+    }
+    
+    // Fallback: calculate direct distance
+    const directDistance = calculateDistance(fromLoc.coordinates, toLoc.coordinates);
+    if (directDistance !== Infinity && directDistance > 0) {
+      // Estimate land travel time (avg 60 km/h)
+      const duration = (directDistance / 1000) / 60 * 3600;
+      return { distance: directDistance, duration, isFlight: false };
+    }
+    
     return null;
+  };
+
+  // Calculate total stats
+  const { totalDistance, totalDuration } = useMemo(() => {
+    let distance = 0;
+    let duration = 0;
+    
+    for (let i = 0; i < locations.length - 1; i++) {
+      const route = getRouteBetween(locations[i], locations[i + 1]);
+      if (route) {
+        distance += route.distance || 0;
+        duration += route.duration || 0;
+      }
+    }
+    
+    return { totalDistance: distance, totalDuration: duration };
+  }, [locations, routes, flights]);
+
+  // Helper to get route to next location within the same day
+  const getRouteToNext = (location: TripLocation, dayLocations: TripLocation[], index: number) => {
+    if (index >= dayLocations.length - 1) return null;
+    const nextLoc = dayLocations[index + 1];
+    return getRouteBetween(location, nextLoc);
   };
 
   // Generate text content for export
@@ -72,14 +162,17 @@ export function ExportItinerary({
 
     days.forEach(day => {
       const dayLocations = locationsByDay[day] || [];
-      const dayDistance = dayLocations.reduce((sum, loc) => {
-        const route = getRouteAfter(loc.id);
-        return sum + (route?.distance || 0);
-      }, 0);
-      const dayDuration = dayLocations.reduce((sum, loc) => {
-        const route = getRouteAfter(loc.id);
-        return sum + (route?.duration || 0);
-      }, 0);
+      
+      // Calculate day stats
+      let dayDistance = 0;
+      let dayDuration = 0;
+      dayLocations.forEach((loc, idx) => {
+        const route = getRouteToNext(loc, dayLocations, idx);
+        if (route) {
+          dayDistance += route.distance || 0;
+          dayDuration += route.duration || 0;
+        }
+      });
 
       content += `───────────────────────────────────────\n`;
       content += `📅 DAY ${day}\n`;
@@ -88,7 +181,7 @@ export function ExportItinerary({
 
       dayLocations.forEach((location, index) => {
         const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
-        const route = getRouteAfter(location.id);
+        const route = getRouteToNext(location, dayLocations, index);
         const isLast = index === dayLocations.length - 1;
 
         content += `   ${globalIndex}. ${location.name.split(",")[0]}\n`;
@@ -99,10 +192,13 @@ export function ExportItinerary({
           content += `      📍 ${location.address}\n`;
         }
         content += `      Type: ${location.type || "Location"}\n`;
-        content += `      Coordinates: ${location.coordinates.lat.toFixed(4)}, ${location.coordinates.lng.toFixed(4)}\n`;
+        if (location.coordinates?.lat && location.coordinates?.lng) {
+          content += `      Coordinates: ${location.coordinates.lat.toFixed(4)}, ${location.coordinates.lng.toFixed(4)}\n`;
+        }
 
         if (route && !isLast) {
-          content += `\n      ↓ ${formatDistance(route.distance)} (${formatDuration(route.duration)})\n\n`;
+          const emoji = route.isFlight ? "✈️" : "↓";
+          content += `\n      ${emoji} ${formatDistance(route.distance)} (${formatDuration(route.duration)})\n\n`;
         } else {
           content += "\n";
         }
@@ -181,14 +277,19 @@ export function ExportItinerary({
   ${days.map(day => {
     const dayLocations = locationsByDay[day] || [];
     const dayColor = getDayColor(day).bg;
-    const dayDistance = dayLocations.reduce((sum, loc) => {
-      const route = getRouteAfter(loc.id);
-      return sum + (route?.distance || 0);
-    }, 0);
-    const dayDuration = dayLocations.reduce((sum, loc) => {
-      const route = getRouteAfter(loc.id);
-      return sum + (route?.duration || 0);
-    }, 0);
+    
+    // Calculate day stats
+    let dayDistance = 0;
+    let dayDuration = 0;
+    dayLocations.forEach((loc, idx) => {
+      if (idx < dayLocations.length - 1) {
+        const route = getRouteBetween(loc, dayLocations[idx + 1]);
+        if (route) {
+          dayDistance += route.distance || 0;
+          dayDuration += route.duration || 0;
+        }
+      }
+    });
 
     return `
     <div class="day">
@@ -198,7 +299,7 @@ export function ExportItinerary({
       </div>
       ${dayLocations.map((location, index) => {
         const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
-        const route = getRouteAfter(location.id);
+        const route = index < dayLocations.length - 1 ? getRouteBetween(location, dayLocations[index + 1]) : null;
         const isLast = index === dayLocations.length - 1;
 
         return `

@@ -1,14 +1,17 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2, Upload, Download } from "lucide-react";
+import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2, Upload, Download, PlaneTakeoff, Train } from "lucide-react";
 import { LocationSearch } from "./LocationSearch";
 import { TripStopsList } from "./TripStopsList";
 import { TripMap } from "./TripMap";
 import { DocumentUpload } from "./DocumentUpload";
 import { ExportItinerary } from "./ExportItinerary";
+import { FlightInput } from "./FlightInput";
+import { TrainInput } from "./TrainInput";
 import { Button } from "@/components/ui/button";
-import type { TripLocation, RouteInfo, GeminiResponse, GeocodeResult } from "@/types/trip";
+import type { TripLocation, RouteInfo, GeminiResponse, GeocodeResult, FlightInfo, TrainInfo } from "@/types/trip";
+import { calculateDistance } from "@/lib/utils";
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 9);
@@ -23,20 +26,56 @@ export function TripPlanner() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [days, setDays] = useState<number[]>([1]);
   const [visibleDays, setVisibleDays] = useState<Set<number>>(new Set([1]));
+  const [visibleTypes, setVisibleTypes] = useState<Set<string>>(new Set(["attraction", "restaurant", "hotel", "landmark", "city", "airport", "station", "custom"]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mapExpanded, setMapExpanded] = useState(false);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showFlightModal, setShowFlightModal] = useState(false);
+  const [showTrainModal, setShowTrainModal] = useState(false);
+  const [flights, setFlights] = useState<FlightInfo[]>([]);
+  const [trains, setTrains] = useState<TrainInfo[]>([]);
 
   // Fetch route between two points using OSRM
   const fetchRoute = useCallback(async (
     from: { lat: number; lng: number },
     to: { lat: number; lng: number }
   ): Promise<RouteInfo | null> => {
+    // Validate coordinates
+    if (!from.lat || !from.lng || !to.lat || !to.lng ||
+        from.lat === 0 || from.lng === 0 || to.lat === 0 || to.lng === 0 ||
+        isNaN(from.lat) || isNaN(from.lng) || isNaN(to.lat) || isNaN(to.lng)) {
+      console.warn("Invalid coordinates for route:", { from, to });
+      // Return a direct line as fallback
+      return {
+        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+        duration: 0,
+        distance: 0,
+      };
+    }
+
     try {
+      // Add timeout to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
       const response = await fetch(
-        `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`
+        `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`,
+        { signal: controller.signal }
       );
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.warn("OSRM API error:", response.status);
+        // Return direct line as fallback
+        return {
+          coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+          duration: 0,
+          distance: 0,
+        };
+      }
+      
       const data = await response.json();
       
       if (data.routes?.[0]) {
@@ -46,29 +85,113 @@ export function TripPlanner() {
           distance: data.routes[0].distance,
         };
       }
-      return null;
+      
+      // Return direct line as fallback if no route found
+      return {
+        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+        duration: 0,
+        distance: 0,
+      };
     } catch (error) {
-      console.error("Route fetch error:", error);
-      return null;
+      // Handle network errors gracefully - return direct line
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn("Route fetch timeout");
+      } else {
+        console.warn("Route fetch error (using direct line):", error);
+      }
+      return {
+        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+        duration: 0,
+        distance: 0,
+      };
     }
   }, []);
 
-  // Calculate routes for all locations
-  const calculateRoutes = useCallback(async (locs: TripLocation[]) => {
-    if (locs.length < 2) {
-      setRoutes([]);
-      return;
-    }
-
-    const newRoutes: RouteInfo[] = [];
+  // Calculate routes for all locations (preserving flight routes)
+  // Max distance for land routes (1000 km) - beyond this, locations should be connected by flight
+  const MAX_LAND_ROUTE_DISTANCE = 1000000; // meters (1000 km)
+  
+  const calculateRoutes = useCallback(async (locs: TripLocation[], currentFlights?: FlightInfo[]) => {
+    // Use provided flights or get from state
+    const flightsList = currentFlights || flights;
+    
+    // Build a set of location IDs that are flight-related (departure/arrival airports)
+    const flightLocationIds = new Set<string>();
+    flightsList.forEach(f => {
+      flightLocationIds.add(`${f.id}-dep`);
+      flightLocationIds.add(`${f.id}-arr`);
+    });
+    
+    // Build a set of location pairs to skip (flight-connected pairs)
+    const skipPairs = new Set<string>();
+    
     for (let i = 0; i < locs.length - 1; i++) {
-      const route = await fetchRoute(locs[i].coordinates, locs[i + 1].coordinates);
-      if (route) {
-        newRoutes.push(route);
+      const loc = locs[i];
+      const nextLoc = locs[i + 1];
+      
+      // Skip if both are flight-related locations (airports from flights)
+      if (flightLocationIds.has(loc.id) && flightLocationIds.has(nextLoc.id)) {
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
+      }
+      
+      // Skip if both locations are airports
+      if (loc.type === 'airport' && nextLoc.type === 'airport') {
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
+      }
+      
+      // Skip if these are consecutive airports that are part of the same flight
+      const locIsFlightDep = loc.id.includes('-dep') && loc.id.startsWith('flight-');
+      const nextLocIsFlightArr = nextLoc.id.includes('-arr') && nextLoc.id.startsWith('flight-');
+      
+      if (locIsFlightDep && nextLocIsFlightArr) {
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
+      }
+      
+      // Skip if either location is an airport (arrival/departure)
+      // This prevents land routes connecting to/from airports
+      if (loc.type === 'airport' || nextLoc.type === 'airport') {
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
+      }
+      
+      // Skip if locations are too far apart for land travel (> 1000 km)
+      // These should be connected by flights instead
+      const distance = calculateDistance(loc.coordinates, nextLoc.coordinates);
+      if (distance > MAX_LAND_ROUTE_DISTANCE) {
+        console.log(`Skipping land route: ${loc.name} to ${nextLoc.name} (${Math.round(distance/1000)}km - too far for land travel)`);
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
+      }
+      
+      // Skip if locations are on different days (prevents cross-day land routes)
+      if (loc.day !== nextLoc.day) {
+        skipPairs.add(`${i}-${i + 1}`);
+        continue;
       }
     }
-    setRoutes(newRoutes);
-  }, [fetchRoute]);
+
+    const newLandRoutes: RouteInfo[] = [];
+    for (let i = 0; i < locs.length - 1; i++) {
+      // Skip if this pair should not have a land route
+      if (skipPairs.has(`${i}-${i + 1}`)) {
+        continue;
+      }
+      
+      const route = await fetchRoute(locs[i].coordinates, locs[i + 1].coordinates);
+      if (route) {
+        newLandRoutes.push(route);
+      }
+    }
+    
+    // Update routes: preserve existing flight routes, replace land routes
+    setRoutes(prevRoutes => {
+      const existingFlightRoutes = prevRoutes.filter(r => r.isFlight);
+      return [...existingFlightRoutes, ...newLandRoutes];
+    });
+  }, [fetchRoute, flights]);
 
   // Add a location from geocode result
   const handleLocationSelect = useCallback(async (result: GeocodeResult) => {
@@ -245,7 +368,7 @@ export function TripPlanner() {
     setVisibleDays(prev => new Set([...prev, newDay]));
   }, [days]);
 
-  // Handle locations extracted from document upload
+  // Handle data extracted from document upload (locations, flights, trains)
   const handleDocumentExtracted = useCallback(async (data: {
     locations: Array<{
       name: string;
@@ -255,11 +378,46 @@ export function TripPlanner() {
       type: string;
       day?: number;
     }>;
+    flights?: Array<{
+      flightNumber: string;
+      airline?: string;
+      departureAirport?: string;
+      departureCode: string;
+      arrivalAirport?: string;
+      arrivalCode: string;
+      departureTime?: string;
+      arrivalTime?: string;
+      day?: number;
+    }>;
+    trains?: Array<{
+      trainNumber: string;
+      trainType?: "high-speed" | "normal" | "metro" | "other";
+      operator?: string;
+      departureStation: string;
+      arrivalStation: string;
+      departureTime?: string;
+      arrivalTime?: string;
+      day?: number;
+    }>;
     message?: string;
     estimatedDays?: number;
   }) => {
+    const allDays: number[] = [];
+    let allNewLocations: TripLocation[] = [];
+    
+    // Process locations - filter out those without valid coordinates
     if (data.locations && data.locations.length > 0) {
-      const newLocations: TripLocation[] = data.locations.map((loc, index) => ({
+      const validDataLocations = data.locations.filter(loc => 
+        loc.coordinates && 
+        typeof loc.coordinates.lat === 'number' && 
+        typeof loc.coordinates.lng === 'number' &&
+        !isNaN(loc.coordinates.lat) && 
+        !isNaN(loc.coordinates.lng) &&
+        loc.coordinates.lat !== 0 && 
+        loc.coordinates.lng !== 0
+      );
+      
+      const newLocations: TripLocation[] = validDataLocations.map((loc, index) => ({
         id: generateId(),
         name: loc.name,
         description: loc.description,
@@ -269,28 +427,232 @@ export function TripPlanner() {
         day: loc.day || 1,
         order: locations.length + index,
       }));
-
-      // Update days array to include all days from the new locations
-      const newDays = [...new Set([...days, ...newLocations.map(l => l.day || 1)])].sort((a, b) => a - b);
-      setDays(newDays);
-      // Also make new days visible
-      setVisibleDays(prev => new Set([...prev, ...newLocations.map(l => l.day || 1)]));
-
-      const allLocations = [...locations, ...newLocations];
-      setLocations(allLocations);
-
-      if (newLocations.length > 0) {
-        setSelectedLocationId(newLocations[0].id);
-      }
-
-      await calculateRoutes(allLocations);
-
-      // Show AI message if provided
-      if (data.message) {
-        setAiMessage(data.message);
+      allNewLocations = [...allNewLocations, ...newLocations];
+      allDays.push(...newLocations.map(l => l.day || 1));
+      
+      // Log if any locations were filtered out
+      const filteredCount = data.locations.length - validDataLocations.length;
+      if (filteredCount > 0) {
+        console.warn(`${filteredCount} location(s) filtered out due to invalid coordinates`);
       }
     }
-  }, [locations, days, calculateRoutes]);
+
+    // Process extracted flights
+    if (data.flights && data.flights.length > 0) {
+      for (const flight of data.flights) {
+        // Look up airport coordinates
+        let depCoords = { lat: 0, lng: 0 };
+        let arrCoords = { lat: 0, lng: 0 };
+        
+        try {
+          // Fetch departure airport
+          const depResponse = await fetch(`/api/airport?code=${flight.departureCode}`);
+          if (depResponse.ok) {
+            const depData = await depResponse.json();
+            depCoords = { lat: depData.lat, lng: depData.lon || depData.lng };
+          }
+          
+          // Fetch arrival airport
+          const arrResponse = await fetch(`/api/airport?code=${flight.arrivalCode}`);
+          if (arrResponse.ok) {
+            const arrData = await arrResponse.json();
+            arrCoords = { lat: arrData.lat, lng: arrData.lon || arrData.lng };
+          }
+        } catch (e) {
+          console.error("Failed to fetch airport coordinates:", e);
+        }
+
+        // Only add if we have valid coordinates
+        if (depCoords.lat !== 0 && arrCoords.lat !== 0) {
+          const flightDay = flight.day || 1;
+          allDays.push(flightDay);
+
+          const flightInfo: FlightInfo = {
+            id: `flight-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            flightNumber: flight.flightNumber,
+            airline: flight.airline || extractAirlineFromNumber(flight.flightNumber),
+            departure: {
+              airport: flight.departureAirport || `${flight.departureCode} Airport`,
+              iata: flight.departureCode,
+              city: "",
+              coordinates: depCoords,
+              scheduledTime: flight.departureTime,
+            },
+            arrival: {
+              airport: flight.arrivalAirport || `${flight.arrivalCode} Airport`,
+              iata: flight.arrivalCode,
+              city: "",
+              coordinates: arrCoords,
+              scheduledTime: flight.arrivalTime,
+            },
+            status: "Extracted",
+            day: flightDay,
+          };
+
+          // Add to flights state
+          setFlights(prev => [...prev, flightInfo]);
+
+          // Add departure and arrival as locations
+          const depLocation: TripLocation = {
+            id: `${flightInfo.id}-dep`,
+            name: `${flightInfo.departure.airport} (${flight.departureCode})`,
+            description: `Flight ${flight.flightNumber} departure`,
+            coordinates: depCoords,
+            type: "airport",
+            day: flightDay,
+            order: locations.length + allNewLocations.length,
+          };
+
+          const arrLocation: TripLocation = {
+            id: `${flightInfo.id}-arr`,
+            name: `${flightInfo.arrival.airport} (${flight.arrivalCode})`,
+            description: `Flight ${flight.flightNumber} arrival`,
+            coordinates: arrCoords,
+            type: "airport",
+            day: flightDay,
+            order: locations.length + allNewLocations.length + 1,
+          };
+
+          allNewLocations = [...allNewLocations, depLocation, arrLocation];
+
+          // Add flight route
+          const flightRoute: RouteInfo = {
+            coordinates: [
+              [depCoords.lng, depCoords.lat],
+              [arrCoords.lng, arrCoords.lat],
+            ],
+            duration: 0,
+            distance: calculateFlightDistance(depCoords, arrCoords),
+            isFlight: true,
+          };
+          setRoutes(prev => [...prev, flightRoute]);
+        }
+      }
+    }
+
+    // Process extracted trains
+    if (data.trains && data.trains.length > 0) {
+      for (const train of data.trains) {
+        // Look up station coordinates via geocoding
+        let depCoords = { lat: 0, lng: 0 };
+        let arrCoords = { lat: 0, lng: 0 };
+        
+        try {
+          // Geocode departure station
+          const depResponse = await fetch(`/api/geocode?q=${encodeURIComponent(train.departureStation + " station")}`);
+          if (depResponse.ok) {
+            const depData = await depResponse.json();
+            if (depData.results && depData.results.length > 0) {
+              depCoords = { lat: depData.results[0].lat, lng: depData.results[0].lng };
+            }
+          }
+          
+          // Geocode arrival station
+          const arrResponse = await fetch(`/api/geocode?q=${encodeURIComponent(train.arrivalStation + " station")}`);
+          if (arrResponse.ok) {
+            const arrData = await arrResponse.json();
+            if (arrData.results && arrData.results.length > 0) {
+              arrCoords = { lat: arrData.results[0].lat, lng: arrData.results[0].lng };
+            }
+          }
+        } catch (e) {
+          console.error("Failed to geocode stations:", e);
+        }
+
+        // Only add if we have valid coordinates
+        if (depCoords.lat !== 0 && arrCoords.lat !== 0) {
+          const trainDay = train.day || 1;
+          allDays.push(trainDay);
+
+          const trainInfo: TrainInfo = {
+            id: `train-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            trainNumber: train.trainNumber,
+            trainType: train.trainType || "normal",
+            operator: train.operator,
+            departure: {
+              station: train.departureStation,
+              city: "",
+              coordinates: depCoords,
+              time: train.departureTime,
+            },
+            arrival: {
+              station: train.arrivalStation,
+              city: "",
+              coordinates: arrCoords,
+              time: train.arrivalTime,
+            },
+            day: trainDay,
+          };
+
+          // Add to trains state
+          setTrains(prev => [...prev, trainInfo]);
+
+          // Add departure and arrival as locations
+          const depLocation: TripLocation = {
+            id: `${trainInfo.id}-dep`,
+            name: train.departureStation,
+            description: `Train ${train.trainNumber} departure`,
+            coordinates: depCoords,
+            type: "station",
+            day: trainDay,
+            order: locations.length + allNewLocations.length,
+          };
+
+          const arrLocation: TripLocation = {
+            id: `${trainInfo.id}-arr`,
+            name: train.arrivalStation,
+            description: `Train ${train.trainNumber} arrival`,
+            coordinates: arrCoords,
+            type: "station",
+            day: trainDay,
+            order: locations.length + allNewLocations.length + 1,
+          };
+
+          allNewLocations = [...allNewLocations, depLocation, arrLocation];
+
+          // Calculate train route
+          const trainRoute = await fetchRoute(depCoords, arrCoords);
+          if (trainRoute) {
+            setRoutes(prev => [...prev, trainRoute]);
+          }
+        }
+      }
+    }
+
+    // Update state with all new locations
+    if (allNewLocations.length > 0) {
+      // Update days array
+      const newDays = [...new Set([...days, ...allDays])].sort((a, b) => a - b);
+      setDays(newDays);
+      setVisibleDays(prev => new Set([...prev, ...allDays]));
+
+      const allLocations = [...locations, ...allNewLocations];
+      setLocations(allLocations);
+
+      setSelectedLocationId(allNewLocations[0].id);
+      await calculateRoutes(allLocations.filter(l => l.type !== "airport")); // Don't recalculate for flights
+    }
+
+    // Show AI message if provided
+    if (data.message) {
+      setAiMessage(data.message);
+    }
+  }, [locations, days, calculateRoutes, fetchRoute]);
+
+  // Helper to extract airline from flight number
+  const extractAirlineFromNumber = (fn: string): string => {
+    const codes: Record<string, string> = {
+      "CZ": "China Southern", "MU": "China Eastern", "CA": "Air China",
+      "TG": "Thai Airways", "FD": "Thai AirAsia", "SL": "Thai Lion Air",
+      "SQ": "Singapore Airlines", "CX": "Cathay Pacific",
+      "JL": "Japan Airlines", "NH": "ANA", "KE": "Korean Air",
+      "VN": "Vietnam Airlines", "QR": "Qatar Airways", "EK": "Emirates",
+      "LH": "Lufthansa", "BA": "British Airways", "AF": "Air France",
+      "AA": "American Airlines", "UA": "United", "DL": "Delta",
+    };
+    const code = fn.substring(0, 2).toUpperCase();
+    return codes[code] || `${code} Airlines`;
+  };
 
   // Remove a day (only if empty)
   const handleRemoveDay = useCallback((dayToRemove: number) => {
@@ -313,6 +675,131 @@ export function TripPlanner() {
       });
     }
   }, [days, locations]);
+
+  // Add a flight
+  const handleFlightAdd = useCallback(async (flight: FlightInfo) => {
+    // Add departure and arrival airports as locations
+    const departureLocation: TripLocation = {
+      id: `${flight.id}-dep`,
+      name: `${flight.departure.airport} (${flight.departure.iata})`,
+      description: `Departure: ${flight.flightNumber} - ${flight.airline}`,
+      coordinates: flight.departure.coordinates,
+      type: "airport",
+      day: flight.day || Math.max(...days, 1),
+      order: locations.length,
+    };
+
+    const arrivalLocation: TripLocation = {
+      id: `${flight.id}-arr`,
+      name: `${flight.arrival.airport} (${flight.arrival.iata})`,
+      description: `Arrival: ${flight.flightNumber} - ${flight.airline}`,
+      coordinates: flight.arrival.coordinates,
+      type: "airport",
+      day: flight.day || Math.max(...days, 1),
+      order: locations.length + 1,
+    };
+
+    const newLocations = [...locations, departureLocation, arrivalLocation];
+    
+    // Create flight route (will be rendered as curved line)
+    const flightRoute: RouteInfo = {
+      coordinates: [
+        [flight.departure.coordinates.lng, flight.departure.coordinates.lat],
+        [flight.arrival.coordinates.lng, flight.arrival.coordinates.lat],
+      ],
+      duration: flight.duration || 0,
+      distance: calculateFlightDistance(
+        flight.departure.coordinates,
+        flight.arrival.coordinates
+      ),
+      isFlight: true,
+    };
+
+    // Update state
+    setFlights(prev => [...prev, flight]);
+    setLocations(newLocations);
+    
+    // Set routes directly - only the flight route for now (no land route between airports)
+    setRoutes(prev => {
+      const existingFlightRoutes = prev.filter(r => r.isFlight);
+      return [...existingFlightRoutes, flightRoute];
+    });
+    
+    setSelectedLocationId(departureLocation.id);
+  }, [locations, days]);
+
+  // Remove a flight
+  const handleFlightRemove = useCallback((flightId: string) => {
+    setFlights(prev => prev.filter(f => f.id !== flightId));
+    // Remove associated locations
+    setLocations(prev => prev.filter(l => !l.id.startsWith(flightId)));
+    // Remove the flight route
+    setRoutes(prev => prev.filter(r => !r.isFlight));
+  }, []);
+
+  // Add a train
+  const handleTrainAdd = useCallback(async (train: TrainInfo) => {
+    setTrains(prev => [...prev, train]);
+    
+    // Add departure and arrival stations as locations
+    const departureLocation: TripLocation = {
+      id: `${train.id}-dep`,
+      name: train.departure.station,
+      description: `Departure: ${train.trainNumber} - ${train.operator || "Railway"}`,
+      coordinates: train.departure.coordinates,
+      type: "station",
+      day: train.day || Math.max(...days, 1),
+      order: locations.length,
+    };
+
+    const arrivalLocation: TripLocation = {
+      id: `${train.id}-arr`,
+      name: train.arrival.station,
+      description: `Arrival: ${train.trainNumber} - ${train.operator || "Railway"}`,
+      coordinates: train.arrival.coordinates,
+      type: "station",
+      day: train.day || Math.max(...days, 1),
+      order: locations.length + 1,
+    };
+
+    const newLocations = [...locations, departureLocation, arrivalLocation];
+    setLocations(newLocations);
+    
+    // Calculate route between stations (using OSRM for ground transportation)
+    const trainRoute = await fetchRoute(
+      train.departure.coordinates,
+      train.arrival.coordinates
+    );
+    
+    if (trainRoute) {
+      // Override duration if provided
+      if (train.duration) {
+        trainRoute.duration = train.duration;
+      }
+      setRoutes(prev => [...prev, trainRoute]);
+    }
+    
+    setSelectedLocationId(departureLocation.id);
+  }, [locations, days, fetchRoute]);
+
+  // Calculate great circle distance for flights
+  function calculateFlightDistance(
+    from: { lat: number; lng: number },
+    to: { lat: number; lng: number }
+  ): number {
+    const R = 6371000; // Earth's radius in meters
+    const φ1 = (from.lat * Math.PI) / 180;
+    const φ2 = (to.lat * Math.PI) / 180;
+    const Δφ = ((to.lat - from.lat) * Math.PI) / 180;
+    const Δλ = ((to.lng - from.lng) * Math.PI) / 180;
+
+    const a =
+      Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c;
+  }
 
   return (
     <div className="h-screen w-full flex flex-col bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -350,6 +837,24 @@ export function TripPlanner() {
             >
               <Upload className="size-4" />
               <span className="hidden sm:inline">Upload</span>
+            </Button>
+            <Button
+              onClick={() => setShowFlightModal(true)}
+              variant="outline"
+              className="h-12 px-4 gap-2 border-sky-500/30 hover:border-sky-500/50 hover:bg-sky-500/10"
+              title="Add flight"
+            >
+              <PlaneTakeoff className="size-4" />
+              <span className="hidden sm:inline">Flight</span>
+            </Button>
+            <Button
+              onClick={() => setShowTrainModal(true)}
+              variant="outline"
+              className="h-12 px-4 gap-2 border-emerald-500/30 hover:border-emerald-500/50 hover:bg-emerald-500/10"
+              title="Add train"
+            >
+              <Train className="size-4" />
+              <span className="hidden sm:inline">Train</span>
             </Button>
             <Button
               onClick={() => setShowExportModal(true)}
@@ -430,6 +935,8 @@ export function TripPlanner() {
               isSearching={isLoading}
               visibleDays={visibleDays}
               onVisibleDaysChange={setVisibleDays}
+              visibleTypes={visibleTypes}
+              onVisibleTypesChange={setVisibleTypes}
             />
           </div>
         </aside>
@@ -474,9 +981,13 @@ export function TripPlanner() {
           <TripMap
             locations={locations}
             routes={routes}
+            flights={flights}
             selectedLocationId={selectedLocationId}
             onLocationClick={setSelectedLocationId}
             visibleDays={visibleDays}
+            visibleTypes={visibleTypes}
+            days={days}
+            onVisibleDaysChange={setVisibleDays}
           />
         </main>
       </div>
@@ -492,7 +1003,7 @@ export function TripPlanner() {
       <DocumentUpload
         isOpen={showUploadModal}
         onClose={() => setShowUploadModal(false)}
-        onLocationsExtracted={handleDocumentExtracted}
+        onDataExtracted={handleDocumentExtracted}
       />
 
       {/* Export Itinerary Modal */}
@@ -501,7 +1012,26 @@ export function TripPlanner() {
         onClose={() => setShowExportModal(false)}
         locations={locations}
         routes={routes}
+        flights={flights}
         days={[...visibleDays].sort((a, b) => a - b)}
+      />
+
+      {/* Flight Input Modal */}
+      <FlightInput
+        isOpen={showFlightModal}
+        onClose={() => setShowFlightModal(false)}
+        onFlightAdd={handleFlightAdd}
+        currentDay={Math.max(...days, 1)}
+        totalDays={days.length}
+      />
+
+      {/* Train Input Modal */}
+      <TrainInput
+        isOpen={showTrainModal}
+        onClose={() => setShowTrainModal(false)}
+        onTrainAdd={handleTrainAdd}
+        currentDay={Math.max(...days, 1)}
+        totalDays={days.length}
       />
     </div>
   );

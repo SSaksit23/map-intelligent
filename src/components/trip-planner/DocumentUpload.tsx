@@ -1,11 +1,34 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
-import { Upload, FileText, Image, X, Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { Upload, FileText, Image, X, Loader2, CheckCircle, AlertCircle, Plane, Train } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
+interface ExtractedFlight {
+  flightNumber: string;
+  airline?: string;
+  departureAirport?: string;
+  departureCode: string;
+  arrivalAirport?: string;
+  arrivalCode: string;
+  departureTime?: string;
+  arrivalTime?: string;
+  day?: number;
+}
+
+interface ExtractedTrain {
+  trainNumber: string;
+  trainType?: "high-speed" | "normal" | "metro" | "other";
+  operator?: string;
+  departureStation: string;
+  arrivalStation: string;
+  departureTime?: string;
+  arrivalTime?: string;
+  day?: number;
+}
+
 interface DocumentUploadProps {
-  onLocationsExtracted: (data: {
+  onDataExtracted: (data: {
     locations: Array<{
       name: string;
       description?: string;
@@ -14,6 +37,8 @@ interface DocumentUploadProps {
       type: string;
       day?: number;
     }>;
+    flights?: ExtractedFlight[];
+    trains?: ExtractedTrain[];
     message?: string;
     estimatedDays?: number;
   }) => void;
@@ -23,7 +48,7 @@ interface DocumentUploadProps {
 
 type UploadStatus = "idle" | "uploading" | "processing" | "success" | "error";
 
-export function DocumentUpload({ onLocationsExtracted, isOpen, onClose }: DocumentUploadProps) {
+export function DocumentUpload({ onDataExtracted, isOpen, onClose }: DocumentUploadProps) {
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -124,18 +149,30 @@ export function DocumentUpload({ onLocationsExtracted, isOpen, onClose }: Docume
 
       const data = await response.json();
 
-      if (data.locations && data.locations.length > 0) {
+      const locationCount = data.locations?.length || 0;
+      const flightCount = data.flights?.length || 0;
+      const trainCount = data.trains?.length || 0;
+      const totalCount = locationCount + flightCount + trainCount;
+
+      if (totalCount > 0) {
         setStatus("success");
-        setResultMessage(`Found ${data.locations.length} location(s) in the document!`);
+        
+        // Build result message
+        const parts: string[] = [];
+        if (locationCount > 0) parts.push(`${locationCount} location(s)`);
+        if (flightCount > 0) parts.push(`${flightCount} flight(s)`);
+        if (trainCount > 0) parts.push(`${trainCount} train(s)`);
+        
+        setResultMessage(`Found ${parts.join(", ")} in the document!`);
         
         // Wait a moment to show success, then call the callback
         setTimeout(() => {
-          onLocationsExtracted(data);
+          onDataExtracted(data);
           handleClose();
         }, 1500);
       } else {
         setStatus("error");
-        setErrorMessage(data.message || "No locations found in the document");
+        setErrorMessage(data.message || "No travel information found in the document");
       }
     } catch (error) {
       setStatus("error");
@@ -187,7 +224,7 @@ export function DocumentUpload({ onLocationsExtracted, isOpen, onClose }: Docume
             </div>
             <div>
               <h2 className="font-semibold">Upload Document</h2>
-              <p className="text-xs text-muted-foreground">Extract locations from your itinerary</p>
+              <p className="text-xs text-muted-foreground">Extract locations, flights & trains from your itinerary</p>
             </div>
           </div>
           <button
@@ -295,7 +332,7 @@ export function DocumentUpload({ onLocationsExtracted, isOpen, onClose }: Docume
             <div className="mt-4 p-3 rounded-lg bg-violet-500/10 border border-violet-500/20 flex items-center gap-2">
               <Loader2 className="size-4 text-violet-500 animate-spin flex-shrink-0" />
               <p className="text-sm text-violet-500">
-                {status === "uploading" ? "Uploading document..." : "Extracting locations with AI..."}
+                {status === "uploading" ? "Uploading document..." : "Extracting travel data with AI..."}
               </p>
             </div>
           )}
@@ -323,7 +360,7 @@ export function DocumentUpload({ onLocationsExtracted, isOpen, onClose }: Docume
             ) : (
               <>
                 <Upload className="size-4 mr-2" />
-                Extract Locations
+                Extract Data
               </>
             )}
           </Button>

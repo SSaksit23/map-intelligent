@@ -38,10 +38,15 @@ async function extractFromWord(buffer: Buffer): Promise<string> {
 async function extractFromImage(base64Data: string, mimeType: string): Promise<string> {
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
   
-  const prompt = `Analyze this image and extract all location information, travel itinerary, or place names mentioned. 
-List all locations, attractions, hotels, restaurants, cities, or any geographical places you can identify.
-If this is a travel itinerary or schedule, extract the day-by-day plan with locations.
-Format your response as plain text listing all locations found.`;
+  const prompt = `Analyze this image and extract all travel information:
+1. Locations: attractions, hotels, restaurants, cities, or any geographical places
+2. Flights: flight numbers, airlines, departure/arrival airports, times
+3. Trains: train numbers, train types (high-speed, regular), stations, times
+4. Day-by-day itinerary if present
+
+Format your response as plain text listing all information found.
+For flights, format as: "Flight: [airline] [flight number] from [departure airport code] to [arrival airport code] at [time]"
+For trains, format as: "Train: [train number] ([type]) from [station] to [station] at [time]"`;
 
   const result = await model.generateContent([
     prompt,
@@ -60,7 +65,7 @@ Format your response as plain text listing all locations found.`;
 async function processTextWithGemini(text: string, context?: string): Promise<object> {
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-  const prompt = `You are a travel assistant. Analyze the following document content and extract all travel-related locations.
+  const prompt = `You are a travel assistant. Analyze the following document content and extract ALL travel-related information including locations, flights, and trains.
 
 Document Content:
 """
@@ -80,18 +85,46 @@ Please respond in JSON format with the following structure:
       "day": number (if day information is available, otherwise 1)
     }
   ],
+  "flights": [
+    {
+      "flightNumber": "e.g., CZ361, TG668",
+      "airline": "Airline name",
+      "departureAirport": "Airport name",
+      "departureCode": "IATA code (3 letters) e.g., BKK",
+      "arrivalAirport": "Airport name", 
+      "arrivalCode": "IATA code (3 letters) e.g., CAN",
+      "departureTime": "HH:MM format if mentioned",
+      "arrivalTime": "HH:MM format if mentioned",
+      "day": number (if day information is available, otherwise 1)
+    }
+  ],
+  "trains": [
+    {
+      "trainNumber": "e.g., G1234, D5678, TGV123",
+      "trainType": "high-speed|normal|metro|other",
+      "operator": "Railway operator name if known",
+      "departureStation": "Station name",
+      "arrivalStation": "Station name",
+      "departureTime": "HH:MM format if mentioned",
+      "arrivalTime": "HH:MM format if mentioned",
+      "day": number (if day information is available, otherwise 1)
+    }
+  ],
   "tripType": "road_trip|city_tour|multi_city|day_trip",
   "estimatedDays": number,
   "message": "A summary of what was found in the document"
 }
 
 Important:
-- Extract ALL locations mentioned in the document
-- If the document contains a day-by-day itinerary, assign correct day numbers to each location
+- Extract ALL locations, flights, and trains mentioned in the document
+- Look for flight numbers (like CZ361, TG668, BA123), airline names, airport codes
+- Look for train numbers (like G1234, D5678), train types (高铁/High-speed, 动车, TGV, ICE), station names
+- If the document contains a day-by-day itinerary, assign correct day numbers
 - Provide accurate coordinates for each location
-- Include hotels, restaurants, attractions, landmarks, cities, etc.
-- For Chinese locations, include both Chinese name and English translation
-- If no locations are found, return an empty locations array with an appropriate message`;
+- For airport codes, use standard IATA 3-letter codes (BKK, CAN, PEK, etc.)
+- For Chinese locations/stations, include both Chinese name and English translation
+- Train types: G/C = high-speed, D = normal high-speed, K/T/Z = normal, metro for subway
+- If no items are found in a category, return an empty array for that category`;
 
   const result = await model.generateContent(prompt);
   const responseText = result.response.text();
@@ -99,12 +132,27 @@ Important:
   // Parse the JSON from the response
   const jsonMatch = responseText.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
-    return JSON.parse(jsonMatch[0]);
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      // Ensure arrays exist even if empty
+      return {
+        locations: parsed.locations || [],
+        flights: parsed.flights || [],
+        trains: parsed.trains || [],
+        tripType: parsed.tripType,
+        estimatedDays: parsed.estimatedDays,
+        message: parsed.message,
+      };
+    } catch (e) {
+      console.error("JSON parse error:", e);
+    }
   }
 
   return {
     locations: [],
-    message: "Could not parse locations from the document",
+    flights: [],
+    trains: [],
+    message: "Could not parse information from the document",
   };
 }
 

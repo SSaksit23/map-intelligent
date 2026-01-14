@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2 } from "lucide-react";
+import { useState, useRef, useMemo } from "react";
+import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2, Filter, Eye, EyeOff } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,8 @@ interface TripStopsListProps {
   isSearching?: boolean;
   visibleDays: Set<number>;
   onVisibleDaysChange: (days: Set<number>) => void;
+  visibleTypes: Set<string>;
+  onVisibleTypesChange: (types: Set<string>) => void;
 }
 
 const typeLabels: Record<string, string> = {
@@ -92,13 +94,46 @@ export function TripStopsList({
   isSearching = false,
   visibleDays,
   onVisibleDaysChange,
+  visibleTypes,
+  onVisibleTypesChange,
 }: TripStopsListProps) {
   const [collapsedDays, setCollapsedDays] = useState<Set<number>>(new Set());
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
   const [dragOverDay, setDragOverDay] = useState<number | null>(null);
   const [dayInputs, setDayInputs] = useState<Record<number, string>>({});
   const [activeDayInput, setActiveDayInput] = useState<number | null>(null);
+  const [showTypeFilter, setShowTypeFilter] = useState(false);
   const dragCounter = useRef(0);
+
+  // Get all unique types from locations
+  const availableTypes = useMemo(() => {
+    const types = new Set<string>();
+    locations.forEach(loc => types.add(loc.type || "custom"));
+    return Array.from(types);
+  }, [locations]);
+
+  // Toggle type visibility
+  const toggleTypeVisibility = (type: string) => {
+    const newSet = new Set(visibleTypes);
+    if (newSet.has(type)) {
+      // Don't allow hiding all types
+      if (newSet.size > 1) {
+        newSet.delete(type);
+      }
+    } else {
+      newSet.add(type);
+    }
+    onVisibleTypesChange(newSet);
+  };
+
+  const showAllTypes = () => {
+    onVisibleTypesChange(new Set(Object.keys(typeLabels)));
+  };
+
+  // Filter locations by visible types
+  const filteredLocations = useMemo(() => {
+    return locations.filter(loc => visibleTypes.has(loc.type || "custom"));
+  }, [locations, visibleTypes]);
 
   const handleDayInputChange = (day: number, value: string) => {
     setDayInputs(prev => ({ ...prev, [day]: value }));
@@ -184,9 +219,9 @@ export function TripStopsList({
   const totalDistance = routes.reduce((sum, r) => sum + r.distance, 0);
   const totalDuration = routes.reduce((sum, r) => sum + r.duration, 0);
 
-  // Group locations by day
+  // Group filtered locations by day
   const locationsByDay = days.reduce((acc, day) => {
-    acc[day] = locations.filter(l => (l.day || 1) === day);
+    acc[day] = filteredLocations.filter(l => (l.day || 1) === day);
     return acc;
   }, {} as Record<number, TripLocation[]>);
 
@@ -281,7 +316,7 @@ export function TripStopsList({
       {days.length > 1 && (
         <div className="p-2 border-b border-border/50 flex-shrink-0">
           <div className="flex items-center gap-1 flex-wrap">
-            <span className="text-[10px] text-muted-foreground mr-1">Filter:</span>
+            <span className="text-[10px] text-muted-foreground mr-1">Days:</span>
             {days.map(day => {
               const dayColor = getDayColor(day);
               const isVisible = visibleDays.has(day);
@@ -312,6 +347,56 @@ export function TripStopsList({
               >
                 Show All
               </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Type Filter */}
+      {availableTypes.length > 1 && (
+        <div className="p-2 border-b border-border/50 flex-shrink-0">
+          <div className="flex items-center gap-1 flex-wrap">
+            <button
+              onClick={() => setShowTypeFilter(!showTypeFilter)}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground mr-1 hover:text-foreground transition-colors"
+            >
+              <Filter className="size-3" />
+              Types:
+              {showTypeFilter ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            </button>
+            {showTypeFilter && (
+              <>
+                {availableTypes.map(type => {
+                  const isVisible = visibleTypes.has(type);
+                  const colors = typeColors[type] || typeColors.custom;
+                  return (
+                    <button
+                      key={type}
+                      onClick={() => toggleTypeVisibility(type)}
+                      className={`
+                        px-2 py-1 rounded-md text-[10px] font-medium transition-all flex items-center gap-1
+                        ${isVisible ? colors : "opacity-40 hover:opacity-70 bg-muted/50"}
+                      `}
+                    >
+                      {isVisible ? <Eye className="size-2.5" /> : <EyeOff className="size-2.5" />}
+                      {typeLabels[type]}
+                    </button>
+                  );
+                })}
+                {visibleTypes.size < availableTypes.length && (
+                  <button
+                    onClick={showAllTypes}
+                    className="px-2 py-1 rounded-md text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    Show All
+                  </button>
+                )}
+              </>
+            )}
+            {!showTypeFilter && visibleTypes.size < availableTypes.length && (
+              <span className="text-[10px] text-amber-500">
+                ({availableTypes.length - visibleTypes.size} hidden)
+              </span>
             )}
           </div>
         </div>
@@ -388,12 +473,15 @@ export function TripStopsList({
                         No stops yet - add below or drag items here
                       </div>
                     ) : (
-                      dayLocations.map((location) => {
-                        const globalIndex = locations.findIndex(l => l.id === location.id);
+                      dayLocations.map((location, dayIndex) => {
                         const routeToNext = getRouteForLocation(location.id);
                         const isHotel = location.type === "hotel";
+                        const isAirport = location.type === "airport";
+                        const isStation = location.type === "station";
                         const isLastInDay = dayLocations[dayLocations.length - 1]?.id === location.id;
                         const isDragging = draggedItem === location.id;
+                        // Use day-relative index (1-based)
+                        const displayNumber = dayIndex + 1;
 
                         return (
                           <div key={location.id}>
@@ -417,7 +505,7 @@ export function TripStopsList({
                                     className="size-6 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-sm"
                                     style={{ backgroundColor: dayColor.bg }}
                                   >
-                                    {isHotel ? "🏨" : globalIndex + 1}
+                                    {isHotel ? "🏨" : isAirport ? "✈️" : isStation ? "🚂" : displayNumber}
                                   </div>
                                 </div>
 

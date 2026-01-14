@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import {
   Map,
   MapMarker,
@@ -9,17 +9,57 @@ import {
   MapRoute,
   MapControls,
 } from "@/components/ui/map";
-import type { TripLocation, RouteInfo } from "@/types/trip";
+import type { TripLocation, RouteInfo, FlightInfo } from "@/types/trip";
 import type MapLibreGL from "maplibre-gl";
 import { getDayColor } from "./TripStopsList";
-import { Layers, Eye, EyeOff, Map as MapIcon, Satellite, Mountain } from "lucide-react";
+import { Layers, Eye, EyeOff, Map as MapIcon, Satellite, Mountain, Plane } from "lucide-react";
 
 interface TripMapProps {
   locations: TripLocation[];
   routes: RouteInfo[];
+  flights?: FlightInfo[];
   selectedLocationId?: string | null;
   onLocationClick?: (id: string) => void;
   visibleDays?: Set<number>;
+  visibleTypes?: Set<string>;
+  days?: number[];
+  onVisibleDaysChange?: (days: Set<number>) => void;
+}
+
+// Generate curved arc points for flight routes (great circle approximation)
+function generateFlightArc(
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number },
+  numPoints: number = 50
+): [number, number][] {
+  const points: [number, number][] = [];
+  
+  // Calculate the midpoint and arc height
+  const midLat = (from.lat + to.lat) / 2;
+  const midLng = (from.lng + to.lng) / 2;
+  
+  // Calculate distance for arc height
+  const latDiff = Math.abs(to.lat - from.lat);
+  const lngDiff = Math.abs(to.lng - from.lng);
+  const distance = Math.sqrt(latDiff * latDiff + lngDiff * lngDiff);
+  
+  // Arc height proportional to distance (max 15 degrees)
+  const arcHeight = Math.min(distance * 0.3, 15);
+  
+  for (let i = 0; i <= numPoints; i++) {
+    const t = i / numPoints;
+    
+    // Linear interpolation for position
+    const lat = from.lat + (to.lat - from.lat) * t;
+    const lng = from.lng + (to.lng - from.lng) * t;
+    
+    // Add arc (parabolic curve)
+    const arcOffset = arcHeight * Math.sin(t * Math.PI);
+    
+    points.push([lng, lat + arcOffset]);
+  }
+  
+  return points;
 }
 
 type MapStyleType = "street" | "satellite" | "terrain";
@@ -51,45 +91,180 @@ const mapStyles: Record<MapStyleType, { light: string; dark: string; label: stri
 export function TripMap({
   locations,
   routes,
+  flights = [],
   selectedLocationId,
   onLocationClick,
   visibleDays,
+  visibleTypes,
+  days = [],
+  onVisibleDaysChange,
 }: TripMapProps) {
   const mapRef = useRef<MapLibreGL.Map | null>(null);
   const [showLabels, setShowLabels] = useState(true);
   const [currentStyle, setCurrentStyle] = useState<MapStyleType>("street");
   const [showStyleMenu, setShowStyleMenu] = useState(false);
+  const [showDayFilter, setShowDayFilter] = useState(false);
 
-  // Filter locations based on visible days
-  const filteredLocations = visibleDays 
-    ? locations.filter(loc => visibleDays.has(loc.day || 1))
-    : locations;
+  // Toggle day visibility
+  const toggleDayVisibility = (day: number) => {
+    if (!visibleDays || !onVisibleDaysChange) return;
+    
+    const newVisible = new Set(visibleDays);
+    if (newVisible.has(day)) {
+      // Don't allow hiding all days
+      if (newVisible.size > 1) {
+        newVisible.delete(day);
+      }
+    } else {
+      newVisible.add(day);
+    }
+    onVisibleDaysChange(newVisible);
+  };
 
-  // Filter routes - only show routes where both start and end locations are visible
-  const filteredRoutes = visibleDays
-    ? routes.filter((_, index) => {
-        const startLoc = locations[index];
-        const endLoc = locations[index + 1];
-        if (!startLoc || !endLoc) return false;
-        return visibleDays.has(startLoc.day || 1) && visibleDays.has(endLoc.day || 1);
-      })
-    : routes;
+  // Show all days
+  const showAllDays = () => {
+    if (onVisibleDaysChange) {
+      onVisibleDaysChange(new Set(days));
+    }
+  };
 
-  // Calculate center based on filtered locations
-  const center: [number, number] = filteredLocations.length > 0
+  // Generate flight arc routes
+  const flightRoutes = useMemo(() => {
+    return flights
+      .filter(f => !visibleDays || visibleDays.has(f.day || 1))
+      .map(flight => ({
+        flight,
+        coordinates: generateFlightArc(flight.departure.coordinates, flight.arrival.coordinates),
+      }));
+  }, [flights, visibleDays]);
+
+  // Filter locations based on visible days AND visible types
+  const filteredLocations = useMemo(() => {
+    return locations.filter(loc => {
+      // Check day visibility
+      if (visibleDays && !visibleDays.has(loc.day || 1)) {
+        return false;
+      }
+      // Check type visibility
+      if (visibleTypes && !visibleTypes.has(loc.type || "custom")) {
+        return false;
+      }
+      return true;
+    });
+  }, [locations, visibleDays, visibleTypes]);
+
+  // Filter routes - only show LAND routes (not flights)
+  // Flight routes are rendered separately as curved arcs
+  const landRoutes = useMemo(() => routes.filter(route => !route.isFlight), [routes]);
+  
+  // Max distance for land routes (1000 km) - beyond this, locations should be connected by flight
+  const MAX_LAND_ROUTE_DISTANCE = 1000000; // meters (1000 km)
+  
+  // Calculate distance between two coordinates (Haversine formula)
+  const getDistance = (from: { lat: number; lng: number } | undefined, to: { lat: number; lng: number } | undefined) => {
+    // Return infinite distance if coordinates are invalid (will be filtered out)
+    if (!from || !to || !from.lat || !from.lng || !to.lat || !to.lng) {
+      return Infinity;
+    }
+    
+    const R = 6371000; // Earth's radius in meters
+    const lat1 = from.lat * Math.PI / 180;
+    const lat2 = to.lat * Math.PI / 180;
+    const deltaLat = (to.lat - from.lat) * Math.PI / 180;
+    const deltaLng = (to.lng - from.lng) * Math.PI / 180;
+
+    const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+              Math.cos(lat1) * Math.cos(lat2) *
+              Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c;
+  };
+  
+  // Build mapping from land route index to location pair
+  const routeToLocationPair = useMemo(() => {
+    const mapping: Array<{ startLoc: TripLocation; endLoc: TripLocation }> = [];
+    let routeIdx = 0;
+    
+    for (let i = 0; i < locations.length - 1; i++) {
+      const startLoc = locations[i];
+      const endLoc = locations[i + 1];
+      
+      // Skip if either location is an airport (they use flight routes)
+      if (startLoc.type === 'airport' || endLoc.type === 'airport') {
+        continue;
+      }
+      
+      // Skip if locations are too far apart
+      const distance = getDistance(startLoc.coordinates, endLoc.coordinates);
+      if (distance > MAX_LAND_ROUTE_DISTANCE) {
+        continue;
+      }
+      
+      // Skip if different days
+      if (startLoc.day !== endLoc.day) {
+        continue;
+      }
+      
+      if (routeIdx < landRoutes.length) {
+        mapping.push({ startLoc, endLoc });
+        routeIdx++;
+      }
+    }
+    
+    return mapping;
+  }, [locations, landRoutes]);
+
+  // Filter land routes based on visible days AND visible types
+  const filteredRoutes = useMemo(() => {
+    return landRoutes.filter((_, index) => {
+      const pair = routeToLocationPair[index];
+      if (!pair) return true;
+      
+      // Check day visibility
+      if (visibleDays) {
+        if (!visibleDays.has(pair.startLoc.day || 1) || !visibleDays.has(pair.endLoc.day || 1)) {
+          return false;
+        }
+      }
+      
+      // Check type visibility
+      if (visibleTypes) {
+        if (!visibleTypes.has(pair.startLoc.type || "custom") || !visibleTypes.has(pair.endLoc.type || "custom")) {
+          return false;
+        }
+      }
+      
+      return true;
+    });
+  }, [landRoutes, routeToLocationPair, visibleDays, visibleTypes]);
+
+  // Filter locations with valid coordinates
+  const validLocations = useMemo(() => {
+    return filteredLocations.filter(loc => 
+      loc.coordinates && 
+      typeof loc.coordinates.lat === 'number' && 
+      typeof loc.coordinates.lng === 'number' &&
+      !isNaN(loc.coordinates.lat) && 
+      !isNaN(loc.coordinates.lng)
+    );
+  }, [filteredLocations]);
+
+  // Calculate center based on valid locations
+  const center: [number, number] = validLocations.length > 0
     ? [
-        filteredLocations.reduce((sum, loc) => sum + loc.coordinates.lng, 0) / filteredLocations.length,
-        filteredLocations.reduce((sum, loc) => sum + loc.coordinates.lat, 0) / filteredLocations.length,
+        validLocations.reduce((sum, loc) => sum + loc.coordinates.lng, 0) / validLocations.length,
+        validLocations.reduce((sum, loc) => sum + loc.coordinates.lat, 0) / validLocations.length,
       ]
     : [0, 20]; // Default center
 
-  // Calculate appropriate zoom level based on filtered locations spread
+  // Calculate appropriate zoom level based on valid locations spread
   const calculateZoom = () => {
-    if (filteredLocations.length === 0) return 2;
-    if (filteredLocations.length === 1) return 12;
+    if (validLocations.length === 0) return 2;
+    if (validLocations.length === 1) return 12;
 
-    const lngs = filteredLocations.map((l) => l.coordinates.lng);
-    const lats = filteredLocations.map((l) => l.coordinates.lat);
+    const lngs = validLocations.map((l) => l.coordinates.lng);
+    const lats = validLocations.map((l) => l.coordinates.lat);
     const lngSpread = Math.max(...lngs) - Math.min(...lngs);
     const latSpread = Math.max(...lats) - Math.min(...lats);
     const maxSpread = Math.max(lngSpread, latSpread);
@@ -105,10 +280,10 @@ export function TripMap({
     return 12;
   };
 
-  // Fit bounds when filtered locations change
+  // Fit bounds when valid locations change
   useEffect(() => {
-    if (mapRef.current && filteredLocations.length > 0) {
-      const bounds = filteredLocations.reduce(
+    if (mapRef.current && validLocations.length > 0) {
+      const bounds = validLocations.reduce(
         (acc, loc) => {
           acc.minLng = Math.min(acc.minLng, loc.coordinates.lng);
           acc.maxLng = Math.max(acc.maxLng, loc.coordinates.lng);
@@ -127,7 +302,7 @@ export function TripMap({
         { padding: 80, duration: 1000, maxZoom: 14 }
       );
     }
-  }, [filteredLocations]);
+  }, [validLocations]);
 
   // Get day color for route (use the starting location's day from original locations array)
   const getRouteColor = (filteredRouteIndex: number) => {
@@ -168,7 +343,7 @@ export function TripMap({
       >
         <MapControls position="bottom-right" showZoom showLocate showFullscreen />
 
-        {/* Render routes with day-based colors */}
+        {/* Render land routes with day-based colors */}
         {filteredRoutes.map((route, index) => (
           <MapRoute
             key={`route-${index}`}
@@ -179,8 +354,20 @@ export function TripMap({
           />
         ))}
 
+        {/* Render flight routes as curved arcs */}
+        {flightRoutes.map(({ flight, coordinates }) => (
+          <MapRoute
+            key={`flight-${flight.id}`}
+            coordinates={coordinates}
+            color="#0ea5e9" // Sky blue for flights
+            width={3}
+            opacity={0.9}
+            dashArray={[8, 4]} // Dashed line for flights
+          />
+        ))}
+
         {/* Render location markers with day-based colors */}
-        {filteredLocations.map((location) => {
+        {validLocations.map((location) => {
           // Get the global index for numbering
           const globalIndex = locations.findIndex(l => l.id === location.id);
           const dayColor = getDayColor(location.day);
@@ -274,6 +461,62 @@ export function TripMap({
             </div>
           )}
         </div>
+
+        {/* Day Filter on Map */}
+        {days.length > 1 && onVisibleDaysChange && (
+          <div className="relative">
+            <button
+              onClick={() => setShowDayFilter(!showDayFilter)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg shadow-md bg-background/90 backdrop-blur-sm hover:bg-accent transition-all"
+            >
+              <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="4" width="18" height="18" rx="2" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+                <line x1="9" y1="4" x2="9" y2="10" />
+                <line x1="15" y1="4" x2="15" y2="10" />
+              </svg>
+              <span className="text-xs font-medium">Days</span>
+            </button>
+
+            {showDayFilter && (
+              <div className="absolute top-full left-0 mt-1 bg-background/95 backdrop-blur-sm rounded-lg shadow-lg border border-border/50 overflow-hidden min-w-[160px] p-2">
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {days.map(day => {
+                    const dayColor = getDayColor(day);
+                    const isVisible = visibleDays?.has(day);
+                    return (
+                      <button
+                        key={day}
+                        onClick={() => toggleDayVisibility(day)}
+                        className={`
+                          px-2 py-1 rounded text-xs font-medium transition-all
+                          ${isVisible
+                            ? "text-white"
+                            : "opacity-40 bg-muted-foreground/20 text-muted-foreground hover:opacity-70"
+                          }
+                        `}
+                        style={isVisible ? { backgroundColor: dayColor.bg } : {}}
+                      >
+                        Day {day}
+                      </button>
+                    );
+                  })}
+                </div>
+                {visibleDays && visibleDays.size < days.length && (
+                  <button
+                    onClick={() => {
+                      showAllDays();
+                      setShowDayFilter(false);
+                    }}
+                    className="w-full px-2 py-1 rounded text-xs font-medium text-center bg-accent hover:bg-accent/80 transition-colors"
+                  >
+                    Show All Days
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
