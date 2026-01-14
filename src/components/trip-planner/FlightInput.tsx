@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { Plane, Loader2, X, ArrowRight, Clock, Calendar, CheckCircle2 } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
+import { Plane, Loader2, X, ArrowRight, Clock, Calendar, CheckCircle2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { FlightInfo } from "@/types/trip";
@@ -10,8 +10,10 @@ interface FlightInputProps {
   isOpen: boolean;
   onClose: () => void;
   onFlightAdd: (flight: FlightInfo) => void;
+  onFlightEdit?: (flight: FlightInfo) => void;
   currentDay: number;
-  totalDays: number; // Total number of days available
+  totalDays: number;
+  editFlight?: FlightInfo | null; // Flight to edit (null = add mode)
 }
 
 interface AirportInfo {
@@ -24,7 +26,9 @@ interface AirportInfo {
   lng: number;
 }
 
-export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDays }: FlightInputProps) {
+export function FlightInput({ isOpen, onClose, onFlightAdd, onFlightEdit, currentDay, totalDays, editFlight }: FlightInputProps) {
+  const isEditMode = !!editFlight;
+  
   // Form fields
   const [flightNumber, setFlightNumber] = useState("");
   const [departureCode, setDepartureCode] = useState("");
@@ -45,6 +49,38 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
   const [departureError, setDepartureError] = useState<string | null>(null);
   const [arrivalError, setArrivalError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Populate form when editing
+  useEffect(() => {
+    if (editFlight && isOpen) {
+      setFlightNumber(editFlight.flightNumber);
+      setDepartureCode(editFlight.departure.iata);
+      setArrivalCode(editFlight.arrival.iata);
+      setDepartureTime(editFlight.departure.scheduledTime || editFlight.departure.time || "");
+      setArrivalTime(editFlight.arrival.scheduledTime || editFlight.arrival.time || "");
+      setSelectedDay(editFlight.day || currentDay);
+      
+      // Set airport info from existing flight
+      setDepartureAirport({
+        name: editFlight.departure.airport,
+        iata: editFlight.departure.iata,
+        icao: editFlight.departure.icao || "",
+        city: editFlight.departure.city,
+        country: editFlight.departure.country || "",
+        lat: editFlight.departure.coordinates.lat,
+        lng: editFlight.departure.coordinates.lng,
+      });
+      setArrivalAirport({
+        name: editFlight.arrival.airport,
+        iata: editFlight.arrival.iata,
+        icao: editFlight.arrival.icao || "",
+        city: editFlight.arrival.city,
+        country: editFlight.arrival.country || "",
+        lat: editFlight.arrival.coordinates.lat,
+        lng: editFlight.arrival.coordinates.lng,
+      });
+    }
+  }, [editFlight, isOpen, currentDay]);
 
   // Lookup airport from API
   const lookupAirport = useCallback(async (code: string, type: "departure" | "arrival") => {
@@ -101,7 +137,7 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
     }
   };
 
-  // Validate and add flight
+  // Validate and add/edit flight
   const handleAddFlight = () => {
     setFormError(null);
     
@@ -136,9 +172,9 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
       duration = Math.round((arrDate.getTime() - depDate.getTime()) / 1000);
     }
 
-    // Create flight info
+    // Create flight info (preserve ID if editing)
     const flight: FlightInfo = {
-      id: `flight-${Date.now()}`,
+      id: isEditMode ? editFlight.id : `flight-${Date.now()}`,
       flightNumber: flightNumber.trim().toUpperCase(),
       airline: extractAirline(flightNumber.trim()),
       departure: {
@@ -155,12 +191,16 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
         coordinates: { lat: arrivalAirport.lat, lng: arrivalAirport.lng },
         scheduledTime: arrivalTime || undefined,
       },
-      status: "Scheduled",
+      status: isEditMode ? editFlight.status : "Scheduled",
       duration,
       day: selectedDay,
     };
 
-    onFlightAdd(flight);
+    if (isEditMode && onFlightEdit) {
+      onFlightEdit(flight);
+    } else {
+      onFlightAdd(flight);
+    }
     resetForm();
     onClose();
   };
@@ -222,12 +262,14 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-border/50">
           <div className="flex items-center gap-3">
-            <div className="size-10 rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center">
-              <Plane className="size-5 text-white" />
+            <div className={`size-10 rounded-xl flex items-center justify-center ${isEditMode ? "bg-gradient-to-br from-amber-500 to-orange-600" : "bg-gradient-to-br from-sky-500 to-blue-600"}`}>
+              {isEditMode ? <Pencil className="size-5 text-white" /> : <Plane className="size-5 text-white" />}
             </div>
             <div>
-              <h2 className="font-semibold">Add Flight</h2>
-              <p className="text-xs text-muted-foreground">Enter flight details for Day {currentDay}</p>
+              <h2 className="font-semibold">{isEditMode ? "Edit Flight" : "Add Flight"}</h2>
+              <p className="text-xs text-muted-foreground">
+                {isEditMode ? `Editing ${editFlight?.flightNumber}` : `Enter flight details for Day ${currentDay}`}
+              </p>
             </div>
           </div>
           <button onClick={handleClose} className="p-2 rounded-lg hover:bg-accent transition-colors">
@@ -448,10 +490,10 @@ export function FlightInput({ isOpen, onClose, onFlightAdd, currentDay, totalDay
           <Button
             onClick={handleAddFlight}
             disabled={!isFormValid}
-            className="flex-1 bg-sky-600 hover:bg-sky-700"
+            className={`flex-1 ${isEditMode ? "bg-amber-600 hover:bg-amber-700" : "bg-sky-600 hover:bg-sky-700"}`}
           >
-            <Plane className="size-4 mr-2" />
-            Add Flight
+            {isEditMode ? <Pencil className="size-4 mr-2" /> : <Plane className="size-4 mr-2" />}
+            {isEditMode ? "Save Changes" : "Add Flight"}
           </Button>
         </div>
       </div>

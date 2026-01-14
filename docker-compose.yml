@@ -1,0 +1,16 @@
+services:
+  trip-planner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trip-planner
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FLIGHT_RADAR=${FLIGHT_RADAR}
+      - API_NINJAS_KEY=${API_NINJAS_KEY}
+    env_file:
+      - .env.local
+    restart: unless-stopped

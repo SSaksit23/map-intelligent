@@ -1,24 +1,29 @@
 "use client";
 
 import { useState, useRef, useMemo } from "react";
-import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2, Filter, Eye, EyeOff } from "lucide-react";
+import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2, Filter, Eye, EyeOff, Plane, Pencil, ArrowUpDown, ArrowRight } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import type { TripLocation, RouteInfo } from "@/types/trip";
+import type { TripLocation, RouteInfo, FlightInfo } from "@/types/trip";
 
 interface TripStopsListProps {
   locations: TripLocation[];
   routes: RouteInfo[];
+  flights?: FlightInfo[];
   selectedLocationId?: string | null;
   onLocationSelect: (id: string) => void;
   onLocationRemove: (id: string) => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
   onDayChange: (locationId: string, newDay: number) => void;
   onAddDay: () => void;
+  onAddDayAfter?: (afterDay: number) => void;
   onRemoveDay: (day: number) => void;
+  onSwapDays?: (fromDay: number, toDay: number) => void;
   onAddLocationToDay: (query: string, day: number) => void;
+  onFlightEdit?: (flight: FlightInfo) => void;
+  onFlightRemove?: (flightId: string) => void;
   days: number[];
   isSearching?: boolean;
   visibleDays: Set<number>;
@@ -82,14 +87,19 @@ function formatDistance(meters: number): string {
 export function TripStopsList({
   locations,
   routes,
+  flights = [],
   selectedLocationId,
   onLocationSelect,
   onLocationRemove,
   onReorder,
   onDayChange,
   onAddDay,
+  onAddDayAfter,
   onRemoveDay,
+  onSwapDays,
   onAddLocationToDay,
+  onFlightEdit,
+  onFlightRemove,
   days,
   isSearching = false,
   visibleDays,
@@ -100,10 +110,61 @@ export function TripStopsList({
   const [collapsedDays, setCollapsedDays] = useState<Set<number>>(new Set());
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
   const [dragOverDay, setDragOverDay] = useState<number | null>(null);
+  const [draggedDay, setDraggedDay] = useState<number | null>(null);
+  const [dragOverDayTarget, setDragOverDayTarget] = useState<number | null>(null);
   const [dayInputs, setDayInputs] = useState<Record<number, string>>({});
   const [activeDayInput, setActiveDayInput] = useState<number | null>(null);
   const [showTypeFilter, setShowTypeFilter] = useState(false);
   const dragCounter = useRef(0);
+  const dayDragCounter = useRef(0);
+
+  // Get flights for a specific day
+  const getFlightsForDay = (day: number) => {
+    return flights.filter(f => (f.day || 1) === day);
+  };
+
+  // Day drag handlers
+  const handleDayDragStart = (e: React.DragEvent, day: number) => {
+    e.stopPropagation();
+    setDraggedDay(day);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("day", day.toString());
+  };
+
+  const handleDayDragEnd = () => {
+    setDraggedDay(null);
+    setDragOverDayTarget(null);
+    dayDragCounter.current = 0;
+  };
+
+  const handleDayDragEnter = (e: React.DragEvent, targetDay: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (draggedDay !== null && draggedDay !== targetDay) {
+      dayDragCounter.current++;
+      setDragOverDayTarget(targetDay);
+    }
+  };
+
+  const handleDayDragLeave = (e: React.DragEvent) => {
+    e.stopPropagation();
+    dayDragCounter.current--;
+    if (dayDragCounter.current === 0) {
+      setDragOverDayTarget(null);
+    }
+  };
+
+  const handleDayDrop = (e: React.DragEvent, targetDay: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const fromDay = parseInt(e.dataTransfer.getData("day"));
+    if (fromDay && fromDay !== targetDay && onSwapDays) {
+      onSwapDays(fromDay, targetDay);
+    }
+    setDraggedDay(null);
+    setDragOverDayTarget(null);
+    dayDragCounter.current = 0;
+  };
 
   // Get all unique types from locations
   const availableTypes = useMemo(() => {
@@ -405,32 +466,66 @@ export function TripStopsList({
       {/* Stops List by Day - Scrollable Container */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="p-3 space-y-3">
-          {days.filter(day => visibleDays.has(day)).map((day) => {
+          {days.filter(day => visibleDays.has(day)).map((day, dayIdx, visibleDaysArray) => {
             const dayColor = getDayColor(day);
             const dayLocations = locationsByDay[day] || [];
+            const dayFlights = getFlightsForDay(day);
             const isCollapsed = collapsedDays.has(day);
             const isDragOver = dragOverDay === day;
-            const canRemoveDay = days.length > 1 && dayLocations.length === 0;
+            const isDayDragOver = dragOverDayTarget === day;
+            const isDayDragging = draggedDay === day;
+            const isLastVisibleDay = dayIdx === visibleDaysArray.length - 1;
+            const hasContent = dayLocations.length > 0 || dayFlights.length > 0;
 
             return (
               <div
                 key={day}
                 className={`rounded-lg border transition-all ${
-                  isDragOver 
+                  isDragOver || isDayDragOver
                     ? "border-2 border-dashed bg-accent/30" 
                     : "border-border/50"
-                }`}
-                style={{ borderColor: isDragOver ? dayColor.bg : undefined }}
-                onDragEnter={() => handleDragEnterDay(day)}
-                onDragLeave={handleDragLeaveDay}
+                } ${isDayDragging ? "opacity-50 scale-[0.98]" : ""}`}
+                style={{ borderColor: isDragOver || isDayDragOver ? dayColor.bg : undefined }}
+                onDragEnter={(e) => {
+                  if (draggedDay !== null) {
+                    handleDayDragEnter(e, day);
+                  } else {
+                    handleDragEnterDay(day);
+                  }
+                }}
+                onDragLeave={(e) => {
+                  if (draggedDay !== null) {
+                    handleDayDragLeave(e);
+                  } else {
+                    handleDragLeaveDay();
+                  }
+                }}
                 onDragOver={handleDragOver}
-                onDrop={(e) => handleDropOnDay(e, day)}
+                onDrop={(e) => {
+                  if (draggedDay !== null) {
+                    handleDayDrop(e, day);
+                  } else {
+                    handleDropOnDay(e, day);
+                  }
+                }}
               >
                 {/* Day Header */}
                 <div
-                  className="flex items-center gap-2 p-2 cursor-pointer hover:bg-accent/30 rounded-t-lg"
+                  className="flex items-center gap-2 p-2 cursor-pointer hover:bg-accent/30 rounded-t-lg group"
                   onClick={() => toggleDayCollapse(day)}
+                  draggable={onSwapDays !== undefined}
+                  onDragStart={(e) => handleDayDragStart(e, day)}
+                  onDragEnd={handleDayDragEnd}
                 >
+                  {/* Day Drag Handle */}
+                  {onSwapDays && (
+                    <div 
+                      className="cursor-grab active:cursor-grabbing opacity-0 group-hover:opacity-100 transition-opacity"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <ArrowUpDown className="size-3.5 text-muted-foreground" />
+                    </div>
+                  )}
                   <button className="p-0.5">
                     {isCollapsed ? (
                       <ChevronRight className="size-4 text-muted-foreground" />
@@ -449,18 +544,27 @@ export function TripStopsList({
                   </span>
                   <Badge variant="secondary" className="text-[10px] h-5">
                     {dayLocations.length} stops
+                    {dayFlights.length > 0 && ` • ${dayFlights.length} flight${dayFlights.length > 1 ? 's' : ''}`}
                   </Badge>
-                  {canRemoveDay && (
+                  {/* Remove Day Button - now shows for all days with confirmation for non-empty days */}
+                  {days.length > 1 && (
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="size-6 text-muted-foreground hover:text-destructive"
+                      className={`size-6 ${hasContent ? "text-muted-foreground/50 hover:text-destructive" : "text-muted-foreground hover:text-destructive"}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onRemoveDay(day);
+                        if (hasContent) {
+                          if (confirm(`Remove Day ${day} and all its ${dayLocations.length} stops${dayFlights.length > 0 ? ` and ${dayFlights.length} flight(s)` : ''}?`)) {
+                            onRemoveDay(day);
+                          }
+                        } else {
+                          onRemoveDay(day);
+                        }
                       }}
+                      title={hasContent ? `Remove Day ${day} (has content)` : `Remove Day ${day}`}
                     >
-                      <X className="size-3" />
+                      <Trash2 className="size-3" />
                     </Button>
                   )}
                 </div>
@@ -468,11 +572,82 @@ export function TripStopsList({
                 {/* Day Content */}
                 {!isCollapsed && (
                   <div className="p-2 pt-0 space-y-1">
-                    {dayLocations.length === 0 ? (
+                    {/* Flights for this day */}
+                    {dayFlights.length > 0 && (
+                      <div className="space-y-1 mb-2">
+                        {dayFlights.map((flight) => (
+                          <Card
+                            key={flight.id}
+                            className="p-2.5 bg-gradient-to-r from-sky-500/10 to-blue-600/10 border-sky-500/30 border-l-4"
+                          >
+                            <div className="flex items-start gap-2">
+                              <div className="size-6 rounded-full bg-sky-500 flex items-center justify-center">
+                                <Plane className="size-3 text-white" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-sm">{flight.flightNumber}</span>
+                                    <span className="text-[10px] text-muted-foreground">{flight.airline}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    {onFlightEdit && (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="size-6 text-sky-500 hover:text-sky-400 hover:bg-sky-500/20"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onFlightEdit(flight);
+                                        }}
+                                        title="Edit flight"
+                                      >
+                                        <Pencil className="size-3" />
+                                      </Button>
+                                    )}
+                                    {onFlightRemove && (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="size-6 text-muted-foreground hover:text-destructive"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onFlightRemove(flight.id);
+                                        }}
+                                        title="Remove flight"
+                                      >
+                                        <Trash2 className="size-3" />
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-xs font-semibold">{flight.departure.iata}</span>
+                                    {flight.departure.scheduledTime && (
+                                      <span className="text-[10px] text-muted-foreground">{flight.departure.scheduledTime}</span>
+                                    )}
+                                  </div>
+                                  <ArrowRight className="size-3 text-sky-500" />
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-xs font-semibold">{flight.arrival.iata}</span>
+                                    {flight.arrival.scheduledTime && (
+                                      <span className="text-[10px] text-muted-foreground">{flight.arrival.scheduledTime}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </Card>
+                        ))}
+                      </div>
+                    )}
+
+                    {dayLocations.length === 0 && dayFlights.length === 0 ? (
                       <div className="text-center py-2 text-[10px] text-muted-foreground">
                         No stops yet - add below or drag items here
                       </div>
-                    ) : (
+                    ) : dayLocations.length > 0 ? (
                       dayLocations.map((location, dayIndex) => {
                         const routeToNext = getRouteForLocation(location.id);
                         const isHotel = location.type === "hotel";
@@ -574,7 +749,7 @@ export function TripStopsList({
                           </div>
                         );
                       })
-                    )}
+                    ) : null}
 
                     {/* Add Location Input - At Bottom of Day */}
                     <div className="mt-2 pt-2 border-t border-border/30">
@@ -625,6 +800,21 @@ export function TripStopsList({
                         </Button>
                       )}
                     </div>
+
+                    {/* Add Day After Button - only show on last visible day */}
+                    {isLastVisibleDay && onAddDayAfter && (
+                      <div className="mt-2 pt-2 border-t border-border/30">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full h-8 text-xs gap-1.5 border-dashed"
+                          onClick={() => onAddDayAfter(day)}
+                        >
+                          <Plus className="size-3" />
+                          Add Day {day + 1}
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

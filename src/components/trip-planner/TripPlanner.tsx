@@ -35,6 +35,7 @@ export function TripPlanner() {
   const [showTrainModal, setShowTrainModal] = useState(false);
   const [flights, setFlights] = useState<FlightInfo[]>([]);
   const [trains, setTrains] = useState<TrainInfo[]>([]);
+  const [editingFlight, setEditingFlight] = useState<FlightInfo | null>(null);
 
   // Fetch route between two points using OSRM
   const fetchRoute = useCallback(async (
@@ -368,6 +369,73 @@ export function TripPlanner() {
     setVisibleDays(prev => new Set([...prev, newDay]));
   }, [days]);
 
+  // Add a new day after a specific day
+  const handleAddDayAfter = useCallback((afterDay: number) => {
+    const newDay = afterDay + 1;
+    // Check if newDay already exists
+    if (days.includes(newDay)) {
+      // Shift all days >= newDay up by 1
+      const shiftedDays = days.map(d => d >= newDay ? d + 1 : d);
+      setDays([...shiftedDays, newDay].sort((a, b) => a - b));
+      // Update locations
+      setLocations(prev => prev.map(loc => ({
+        ...loc,
+        day: (loc.day || 1) >= newDay ? (loc.day || 1) + 1 : (loc.day || 1)
+      })));
+      // Update flights
+      setFlights(prev => prev.map(f => ({
+        ...f,
+        day: (f.day || 1) >= newDay ? (f.day || 1) + 1 : (f.day || 1)
+      })));
+      // Update trains
+      setTrains(prev => prev.map(t => ({
+        ...t,
+        day: (t.day || 1) >= newDay ? (t.day || 1) + 1 : (t.day || 1)
+      })));
+    } else {
+      setDays([...days, newDay].sort((a, b) => a - b));
+    }
+    setVisibleDays(prev => new Set([...prev, newDay]));
+  }, [days]);
+
+  // Swap two days (move all content from one day to another)
+  const handleSwapDays = useCallback(async (fromDay: number, toDay: number) => {
+    // Swap the day assignments for all locations
+    const newLocations = locations.map(loc => {
+      if ((loc.day || 1) === fromDay) {
+        return { ...loc, day: toDay };
+      } else if ((loc.day || 1) === toDay) {
+        return { ...loc, day: fromDay };
+      }
+      return loc;
+    });
+    
+    // Swap flights
+    setFlights(prev => prev.map(f => {
+      if ((f.day || 1) === fromDay) {
+        return { ...f, day: toDay };
+      } else if ((f.day || 1) === toDay) {
+        return { ...f, day: fromDay };
+      }
+      return f;
+    }));
+
+    // Swap trains
+    setTrains(prev => prev.map(t => {
+      if ((t.day || 1) === fromDay) {
+        return { ...t, day: toDay };
+      } else if ((t.day || 1) === toDay) {
+        return { ...t, day: fromDay };
+      }
+      return t;
+    }));
+
+    // Sort locations by day
+    newLocations.sort((a, b) => (a.day || 1) - (b.day || 1));
+    setLocations(newLocations);
+    await calculateRoutes(newLocations);
+  }, [locations, calculateRoutes]);
+
   // Handle data extracted from document upload (locations, flights, trains)
   const handleDocumentExtracted = useCallback(async (data: {
     locations: Array<{
@@ -654,10 +722,24 @@ export function TripPlanner() {
     return codes[code] || `${code} Airlines`;
   };
 
-  // Remove a day (only if empty)
-  const handleRemoveDay = useCallback((dayToRemove: number) => {
-    const locationsInDay = locations.filter(l => (l.day || 1) === dayToRemove);
-    if (locationsInDay.length > 0) return; // Don't remove if has locations
+  // Remove a day and all its content
+  const handleRemoveDay = useCallback(async (dayToRemove: number) => {
+    // Remove locations for this day
+    const newLocations = locations.filter(l => (l.day || 1) !== dayToRemove);
+    
+    // Remove flights for this day
+    const flightsToRemove = flights.filter(f => (f.day || 1) === dayToRemove);
+    setFlights(prev => prev.filter(f => (f.day || 1) !== dayToRemove));
+    
+    // Remove trains for this day
+    setTrains(prev => prev.filter(t => (t.day || 1) !== dayToRemove));
+    
+    // Remove flight routes
+    flightsToRemove.forEach(() => {
+      setRoutes(prev => prev.filter(r => !r.isFlight));
+    });
+    
+    setLocations(newLocations);
     
     const newDays = days.filter(d => d !== dayToRemove);
     if (newDays.length === 0) {
@@ -674,7 +756,9 @@ export function TripPlanner() {
         return newVisible;
       });
     }
-  }, [days, locations]);
+    
+    await calculateRoutes(newLocations);
+  }, [days, locations, flights, calculateRoutes]);
 
   // Add a flight
   const handleFlightAdd = useCallback(async (flight: FlightInfo) => {
@@ -733,8 +817,81 @@ export function TripPlanner() {
     setFlights(prev => prev.filter(f => f.id !== flightId));
     // Remove associated locations
     setLocations(prev => prev.filter(l => !l.id.startsWith(flightId)));
-    // Remove the flight route
-    setRoutes(prev => prev.filter(r => !r.isFlight));
+    // Remove the flight route (we need to recalculate which routes to keep)
+    setRoutes(prev => {
+      // Keep only non-flight routes or flight routes for remaining flights
+      const remainingFlightIds = flights.filter(f => f.id !== flightId).map(f => f.id);
+      return prev.filter(r => {
+        if (!r.isFlight) return true;
+        // This is a simplification - ideally we'd track which route belongs to which flight
+        return remainingFlightIds.length > 0;
+      });
+    });
+  }, [flights]);
+
+  // Edit a flight
+  const handleFlightEdit = useCallback(async (updatedFlight: FlightInfo) => {
+    // Remove old flight data
+    const oldFlight = flights.find(f => f.id === updatedFlight.id);
+    if (!oldFlight) return;
+
+    // Update flights array
+    setFlights(prev => prev.map(f => f.id === updatedFlight.id ? updatedFlight : f));
+
+    // Update associated locations
+    setLocations(prev => {
+      const filtered = prev.filter(l => !l.id.startsWith(updatedFlight.id));
+      
+      const departureLocation: TripLocation = {
+        id: `${updatedFlight.id}-dep`,
+        name: `${updatedFlight.departure.airport} (${updatedFlight.departure.iata})`,
+        description: `Departure: ${updatedFlight.flightNumber} - ${updatedFlight.airline}`,
+        coordinates: updatedFlight.departure.coordinates,
+        type: "airport",
+        day: updatedFlight.day || Math.max(...days, 1),
+        order: filtered.length,
+      };
+
+      const arrivalLocation: TripLocation = {
+        id: `${updatedFlight.id}-arr`,
+        name: `${updatedFlight.arrival.airport} (${updatedFlight.arrival.iata})`,
+        description: `Arrival: ${updatedFlight.flightNumber} - ${updatedFlight.airline}`,
+        coordinates: updatedFlight.arrival.coordinates,
+        type: "airport",
+        day: updatedFlight.day || Math.max(...days, 1),
+        order: filtered.length + 1,
+      };
+
+      return [...filtered, departureLocation, arrivalLocation];
+    });
+
+    // Update flight route
+    const flightRoute: RouteInfo = {
+      coordinates: [
+        [updatedFlight.departure.coordinates.lng, updatedFlight.departure.coordinates.lat],
+        [updatedFlight.arrival.coordinates.lng, updatedFlight.arrival.coordinates.lat],
+      ],
+      duration: updatedFlight.duration || 0,
+      distance: calculateFlightDistance(
+        updatedFlight.departure.coordinates,
+        updatedFlight.arrival.coordinates
+      ),
+      isFlight: true,
+    };
+
+    setRoutes(prev => {
+      // Replace the flight route (simplified - assumes one flight route)
+      const nonFlightRoutes = prev.filter(r => !r.isFlight);
+      return [...nonFlightRoutes, flightRoute];
+    });
+
+    setEditingFlight(null);
+  }, [flights, days]);
+
+  // Open flight edit modal
+  const handleOpenFlightEdit = useCallback((flight: FlightInfo) => {
+    setEditingFlight(flight);
+    setShowFlightModal(true);
   }, []);
 
   // Add a train
@@ -923,14 +1080,19 @@ export function TripPlanner() {
             <TripStopsList
               locations={locations}
               routes={routes}
+              flights={flights}
               selectedLocationId={selectedLocationId}
               onLocationSelect={setSelectedLocationId}
               onLocationRemove={handleLocationRemove}
               onReorder={handleReorder}
               onDayChange={handleDayChange}
               onAddDay={handleAddDay}
+              onAddDayAfter={handleAddDayAfter}
               onRemoveDay={handleRemoveDay}
+              onSwapDays={handleSwapDays}
               onAddLocationToDay={handleAddLocationToDay}
+              onFlightEdit={handleOpenFlightEdit}
+              onFlightRemove={handleFlightRemove}
               days={days}
               isSearching={isLoading}
               visibleDays={visibleDays}
@@ -1019,8 +1181,13 @@ export function TripPlanner() {
       {/* Flight Input Modal */}
       <FlightInput
         isOpen={showFlightModal}
-        onClose={() => setShowFlightModal(false)}
+        onClose={() => {
+          setShowFlightModal(false);
+          setEditingFlight(null);
+        }}
         onFlightAdd={handleFlightAdd}
+        onFlightEdit={handleFlightEdit}
+        editFlight={editingFlight}
         currentDay={Math.max(...days, 1)}
         totalDays={days.length}
       />

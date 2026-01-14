@@ -368,10 +368,33 @@ export function TripMap({
 
         {/* Render location markers with day-based colors */}
         {validLocations.map((location) => {
-          // Get the global index for numbering
-          const globalIndex = locations.findIndex(l => l.id === location.id);
           const dayColor = getDayColor(location.day);
           const isHotel = location.type === "hotel";
+          const isAirport = location.type === "airport";
+          const isStation = location.type === "station";
+          
+          // Only number these types: attraction, city, hotel, restaurant, landmark, custom
+          const shouldShowNumber = !isAirport && !isStation;
+          
+          // Calculate display number only for numbered types (within the same day)
+          let displayNumber = 0;
+          if (shouldShowNumber) {
+            // Count only numbered types in the same day that come before this location
+            const sameTypeLocations = locations.filter(l => 
+              l.type !== "airport" && 
+              l.type !== "station" &&
+              (l.day || 1) === (location.day || 1)
+            );
+            displayNumber = sameTypeLocations.findIndex(l => l.id === location.id) + 1;
+          }
+
+          // Get marker content based on type
+          const getMarkerContent = () => {
+            if (isHotel) return "🏨";
+            if (isAirport) return "✈️";
+            if (isStation) return "🚂";
+            return displayNumber;
+          };
 
           return (
             <MapMarker
@@ -388,16 +411,18 @@ export function TripMap({
                     transition-transform hover:scale-110
                     ${selectedLocationId === location.id ? "ring-2 ring-offset-2 ring-indigo-500 scale-110" : ""}
                     ${isHotel ? "ring-2 ring-violet-300" : ""}
+                    ${isAirport ? "bg-sky-500" : ""}
+                    ${isStation ? "bg-emerald-500" : ""}
                   `}
-                  style={{ backgroundColor: dayColor.bg }}
+                  style={{ backgroundColor: isAirport ? "#0ea5e9" : isStation ? "#10b981" : dayColor.bg }}
                 >
-                  {isHotel ? "🏨" : globalIndex + 1}
+                  {getMarkerContent()}
                 </div>
                 {showLabels && (
                   <MarkerLabel position="bottom">
                     <span
                       className="bg-background/90 backdrop-blur-sm px-2 py-0.5 rounded text-xs font-medium shadow-sm"
-                      style={{ borderLeft: `3px solid ${dayColor.bg}` }}
+                      style={{ borderLeft: `3px solid ${isAirport ? "#0ea5e9" : isStation ? "#10b981" : dayColor.bg}` }}
                     >
                       {location.name.split(",")[0]}
                     </span>
