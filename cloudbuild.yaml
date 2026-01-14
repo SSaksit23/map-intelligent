@@ -1,0 +1,41 @@
+# Google Cloud Build configuration
+# This file automates building and deploying to Cloud Run
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/voyage-ai-trip-planner', '.']
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/voyage-ai-trip-planner']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'voyage-ai-trip-planner'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/voyage-ai-trip-planner'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'GEMINI_API_KEY=${_GEMINI_API_KEY}'
+
+# Substitution variables (set these in Cloud Build trigger)
+substitutions:
+  _REGION: asia-southeast1  # Change to your preferred region
+  _GEMINI_API_KEY: ''       # Set in Cloud Build trigger secrets
+
+# Build options
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Container image to store
+images:
+  - 'gcr.io/$PROJECT_ID/voyage-ai-trip-planner'

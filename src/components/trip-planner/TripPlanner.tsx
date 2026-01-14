@@ -481,6 +481,13 @@ export function TripPlanner() {
         </main>
       </div>
 
+      {/* Footer */}
+      <footer className={`flex-shrink-0 border-t border-border/30 bg-background/40 backdrop-blur-xl py-2 px-4 ${mapExpanded ? "hidden" : ""}`}>
+        <p className="text-center text-xs text-muted-foreground">
+          This app made by <span className="font-medium text-foreground/80">Saksit Saelow</span>
+        </p>
+      </footer>
+
       {/* Document Upload Modal */}
       <DocumentUpload
         isOpen={showUploadModal}
