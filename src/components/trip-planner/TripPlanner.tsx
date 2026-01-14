@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2 } from "lucide-react";
+import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2, Upload, Download } from "lucide-react";
 import { LocationSearch } from "./LocationSearch";
 import { TripStopsList } from "./TripStopsList";
 import { TripMap } from "./TripMap";
+import { DocumentUpload } from "./DocumentUpload";
+import { ExportItinerary } from "./ExportItinerary";
+import { Button } from "@/components/ui/button";
 import type { TripLocation, RouteInfo, GeminiResponse, GeocodeResult } from "@/types/trip";
 
 function generateId(): string {
@@ -22,6 +25,8 @@ export function TripPlanner() {
   const [visibleDays, setVisibleDays] = useState<Set<number>>(new Set([1]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mapExpanded, setMapExpanded] = useState(false);
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
 
   // Fetch route between two points using OSRM
   const fetchRoute = useCallback(async (
@@ -240,6 +245,53 @@ export function TripPlanner() {
     setVisibleDays(prev => new Set([...prev, newDay]));
   }, [days]);
 
+  // Handle locations extracted from document upload
+  const handleDocumentExtracted = useCallback(async (data: {
+    locations: Array<{
+      name: string;
+      description?: string;
+      address?: string;
+      coordinates: { lat: number; lng: number };
+      type: string;
+      day?: number;
+    }>;
+    message?: string;
+    estimatedDays?: number;
+  }) => {
+    if (data.locations && data.locations.length > 0) {
+      const newLocations: TripLocation[] = data.locations.map((loc, index) => ({
+        id: generateId(),
+        name: loc.name,
+        description: loc.description,
+        address: loc.address,
+        coordinates: loc.coordinates,
+        type: loc.type as TripLocation["type"],
+        day: loc.day || 1,
+        order: locations.length + index,
+      }));
+
+      // Update days array to include all days from the new locations
+      const newDays = [...new Set([...days, ...newLocations.map(l => l.day || 1)])].sort((a, b) => a - b);
+      setDays(newDays);
+      // Also make new days visible
+      setVisibleDays(prev => new Set([...prev, ...newLocations.map(l => l.day || 1)]));
+
+      const allLocations = [...locations, ...newLocations];
+      setLocations(allLocations);
+
+      if (newLocations.length > 0) {
+        setSelectedLocationId(newLocations[0].id);
+      }
+
+      await calculateRoutes(allLocations);
+
+      // Show AI message if provided
+      if (data.message) {
+        setAiMessage(data.message);
+      }
+    }
+  }, [locations, days, calculateRoutes]);
+
   // Remove a day (only if empty)
   const handleRemoveDay = useCallback((dayToRemove: number) => {
     const locationsInDay = locations.filter(l => (l.day || 1) === dayToRemove);
@@ -281,12 +333,35 @@ export function TripPlanner() {
             </div>
           </div>
           
-          <LocationSearch
-            onLocationSelect={handleLocationSelect}
-            onAISearch={handleAISearch}
-            isLoading={isLoading}
-            placeholder="Try: 'Plan a 3-day trip to Paris' or 'Road trip from LA to San Francisco'"
-          />
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <LocationSearch
+                onLocationSelect={handleLocationSelect}
+                onAISearch={handleAISearch}
+                isLoading={isLoading}
+                placeholder="Try: 'Plan a 3-day trip to Paris' or 'Road trip from LA to San Francisco'"
+              />
+            </div>
+            <Button
+              onClick={() => setShowUploadModal(true)}
+              variant="outline"
+              className="h-12 px-4 gap-2 border-violet-500/30 hover:border-violet-500/50 hover:bg-violet-500/10"
+              title="Upload itinerary document"
+            >
+              <Upload className="size-4" />
+              <span className="hidden sm:inline">Upload</span>
+            </Button>
+            <Button
+              onClick={() => setShowExportModal(true)}
+              variant="outline"
+              className="h-12 px-4 gap-2 border-green-500/30 hover:border-green-500/50 hover:bg-green-500/10"
+              title="Export itinerary"
+              disabled={locations.length === 0}
+            >
+              <Download className="size-4" />
+              <span className="hidden sm:inline">Export</span>
+            </Button>
+          </div>
 
           {/* AI Message */}
           {aiMessage && (
@@ -405,6 +480,22 @@ export function TripPlanner() {
           />
         </main>
       </div>
+
+      {/* Document Upload Modal */}
+      <DocumentUpload
+        isOpen={showUploadModal}
+        onClose={() => setShowUploadModal(false)}
+        onLocationsExtracted={handleDocumentExtracted}
+      />
+
+      {/* Export Itinerary Modal */}
+      <ExportItinerary
+        isOpen={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        locations={locations}
+        routes={routes}
+        days={[...visibleDays].sort((a, b) => a - b)}
+      />
     </div>
   );
 }
