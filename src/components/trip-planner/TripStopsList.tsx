@@ -740,6 +740,50 @@ export function TripStopsList({
                 {/* Day Content */}
                 {!isCollapsed && (
                   <div className="p-2 pt-0 space-y-1">
+                    {/* Starting point indicator - shows where this day starts from (last location of previous day) */}
+                    {(() => {
+                      const sortedDaysList = [...days].sort((a, b) => a - b);
+                      const currentDayIndex = sortedDaysList.indexOf(day);
+                      const prevDay = currentDayIndex > 0 ? sortedDaysList[currentDayIndex - 1] : null;
+                      
+                      if (prevDay) {
+                        const prevDayLocs = locationsByDay[prevDay] || [];
+                        // Find last non-airport, non-station location of previous day
+                        const prevDayNonTransport = prevDayLocs.filter(
+                          l => l.type !== 'airport' && l.type !== 'station'
+                        );
+                        const lastPrevDayLoc = prevDayNonTransport.length > 0 
+                          ? prevDayNonTransport[prevDayNonTransport.length - 1]
+                          : prevDayLocs[prevDayLocs.length - 1];
+                        
+                        if (lastPrevDayLoc) {
+                          const prevDayColor = getDayColor(prevDay);
+                          return (
+                            <div className="mb-2 px-2 py-1.5 bg-gradient-to-r from-slate-500/10 to-transparent rounded-lg border border-slate-500/20 border-dashed">
+                              <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  <MapPin className="size-3 text-slate-400" />
+                                  <span className="text-[10px] text-slate-400">Starting from:</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <div
+                                    className="size-4 rounded-full flex items-center justify-center text-white text-[8px] font-bold"
+                                    style={{ backgroundColor: prevDayColor.bg }}
+                                  >
+                                    {prevDay}
+                                  </div>
+                                  <span className="text-[10px] font-medium text-slate-300 truncate">
+                                    {lastPrevDayLoc.name.split(",")[0]}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        }
+                      }
+                      return null;
+                    })()}
+
                     {/* Flights for this day */}
                     {dayFlights.length > 0 && (
                       <div className="space-y-1 mb-2">
