@@ -1,12 +1,21 @@
 "use client";
 
 import { useState, useRef, useMemo } from "react";
-import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2, Filter, Eye, EyeOff, Plane, Pencil, ArrowUpDown, ArrowRight } from "lucide-react";
+import { GripVertical, Trash2, MapPin, Clock, Route, Calendar, Building2, Plus, X, ChevronDown, ChevronRight, Search, Loader2, Filter, Eye, EyeOff, Plane, Pencil, ArrowUpDown, ArrowRight, Hotel, Star, Sparkles } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import type { TripLocation, RouteInfo, FlightInfo } from "@/types/trip";
+import type { TripLocation, RouteInfo, FlightInfo, AccommodationSuggestion } from "@/types/trip";
+
+interface OvernightRoute {
+  fromDay: number;
+  toDay: number;
+  fromLocation: string;
+  toLocation: string;
+  distance: number;
+  duration: number;
+}
 
 interface TripStopsListProps {
   locations: TripLocation[];
@@ -30,6 +39,11 @@ interface TripStopsListProps {
   onVisibleDaysChange: (days: Set<number>) => void;
   visibleTypes: Set<string>;
   onVisibleTypesChange: (types: Set<string>) => void;
+  // Accommodation suggestions
+  overnightRoutes?: OvernightRoute[];
+  accommodationSuggestions?: Map<string, AccommodationSuggestion[]>;
+  loadingAccommodations?: Set<string>;
+  onFetchAccommodations?: (route: OvernightRoute) => void;
 }
 
 const typeLabels: Record<string, string> = {
@@ -106,6 +120,10 @@ export function TripStopsList({
   onVisibleDaysChange,
   visibleTypes,
   onVisibleTypesChange,
+  overnightRoutes = [],
+  accommodationSuggestions = new Map(),
+  loadingAccommodations = new Set(),
+  onFetchAccommodations,
 }: TripStopsListProps) {
   const [collapsedDays, setCollapsedDays] = useState<Set<number>>(new Set());
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -967,7 +985,7 @@ export function TripStopsList({
                       )}
                     </div>
 
-                    {/* Cross-day route connection to next day */}
+                    {/* Cross-day route connection to next day with accommodation suggestions */}
                     {(() => {
                       // Find the next day that has locations
                       const sortedDaysList = [...days].sort((a, b) => a - b);
@@ -979,9 +997,18 @@ export function TripStopsList({
                         if (nextDayLocs.length > 0) {
                           const crossDayRoute = getCrossDayRoute(day, nextDay);
                           const nextDayColor = getDayColor(nextDay);
+                          const accommodationKey = `${day}-${nextDay}`;
+                          const suggestions = accommodationSuggestions.get(accommodationKey) || [];
+                          const isLoadingAccommodation = loadingAccommodations.has(accommodationKey);
+                          
+                          // Find the overnight route for this day transition
+                          const overnightRoute = overnightRoutes.find(
+                            r => r.fromDay === day && r.toDay === nextDay
+                          );
                           
                           return (
-                            <div className="mt-3 pt-2 border-t border-purple-500/30">
+                            <div className="mt-3 pt-2 border-t border-purple-500/30 space-y-2">
+                              {/* Cross-day route info */}
                               <div className="flex items-center gap-2 px-2 py-1.5 bg-purple-500/10 rounded-lg">
                                 <ArrowRight className="size-3.5 text-purple-400" />
                                 <div className="flex-1">
@@ -1012,6 +1039,62 @@ export function TripStopsList({
                                   {nextDay}
                                 </div>
                               </div>
+
+                              {/* Accommodation suggestions section */}
+                              {overnightRoute && onFetchAccommodations && (
+                                <div className="px-2">
+                                  {suggestions.length === 0 && !isLoadingAccommodation ? (
+                                    <button
+                                      onClick={() => onFetchAccommodations(overnightRoute)}
+                                      className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg border border-dashed border-violet-500/30 hover:border-violet-500/50 hover:bg-violet-500/5 transition-all text-violet-400 hover:text-violet-300"
+                                    >
+                                      <Hotel className="size-3.5" />
+                                      <span className="text-[10px] font-medium">Find Accommodations</span>
+                                      <Sparkles className="size-3" />
+                                    </button>
+                                  ) : isLoadingAccommodation ? (
+                                    <div className="flex items-center justify-center gap-2 py-3 text-violet-400">
+                                      <Loader2 className="size-4 animate-spin" />
+                                      <span className="text-[10px]">Finding hotels...</span>
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-1.5 text-violet-400">
+                                        <Hotel className="size-3.5" />
+                                        <span className="text-[10px] font-semibold">Accommodation Suggestions</span>
+                                      </div>
+                                      <div className="space-y-1.5">
+                                        {suggestions.map((hotel, idx) => (
+                                          <div
+                                            key={idx}
+                                            className="p-2 rounded-lg bg-violet-500/10 border border-violet-500/20"
+                                          >
+                                            <div className="flex items-start justify-between gap-2">
+                                              <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-1.5">
+                                                  <span className="text-[11px] font-semibold text-violet-200 truncate">
+                                                    {hotel.name}
+                                                  </span>
+                                                  <span className="text-[9px] text-amber-400 flex-shrink-0">
+                                                    {hotel.priceRange}
+                                                  </span>
+                                                </div>
+                                                <p className="text-[9px] text-violet-300/80 mt-0.5 line-clamp-2">
+                                                  {hotel.description}
+                                                </p>
+                                                <p className="text-[8px] text-violet-400/60 mt-1 italic flex items-center gap-1">
+                                                  <Star className="size-2" />
+                                                  {hotel.reason}
+                                                </p>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           );
                         }

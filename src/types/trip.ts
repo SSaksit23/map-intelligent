@@ -18,8 +18,18 @@ export interface RouteInfo {
   distance: number; // meters
   isFlight?: boolean; // Whether this is a flight route
   isCrossDay?: boolean; // Whether this route connects two different days
+  isOvernight?: boolean; // Distinguishes the route between days (alias for isCrossDay)
   fromDay?: number; // Starting day for cross-day routes
   toDay?: number; // Ending day for cross-day routes
+  startLocationName?: string; // Name of starting location (for overnight routes)
+  endLocationName?: string; // Name of ending location (for overnight routes)
+}
+
+export interface AccommodationSuggestion {
+  name: string;
+  description: string;
+  priceRange: string;
+  reason: string;
 }
 
 export interface FlightInfo {

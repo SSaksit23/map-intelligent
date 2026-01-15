@@ -373,20 +373,21 @@ export function TripMap({
 
         {/* Render land routes with day-based colors */}
         {filteredRoutes.map(({ route, pair, index }) => {
-          // Use route.isCrossDay directly - it's set by TripPlanner.calculateRoutes
-          const isCrossDay = route.isCrossDay;
-          // For cross-day routes, use fromDay; for normal routes, use pair's day
-          const routeDay = isCrossDay ? (route.fromDay || 1) : (pair?.startLoc.day || 1);
-          const routeColor = isCrossDay ? "#a855f7" : getDayColor(routeDay).bg;
+          // Use route.isCrossDay or route.isOvernight - both indicate overnight routes
+          const isOvernight = route.isCrossDay || route.isOvernight;
+          // For overnight routes, use fromDay; for normal routes, use pair's day
+          const routeDay = isOvernight ? (route.fromDay || 1) : (pair?.startLoc.day || 1);
+          // Use gray (#6b7280) for overnight routes as suggested in the guide, purple for visual distinction
+          const routeColor = isOvernight ? "#8b5cf6" : getDayColor(routeDay).bg;
           
           return (
             <MapRoute
               key={`route-${index}`}
               coordinates={route.coordinates}
-              color={routeColor} // Purple for cross-day, day color otherwise
-              width={isCrossDay ? 3 : 4}
-              opacity={isCrossDay ? 0.7 : 0.8}
-              dashArray={isCrossDay ? [10, 5] : undefined} // Dashed for cross-day
+              color={routeColor} // Purple/violet for overnight, day color otherwise
+              width={isOvernight ? 3 : 4}
+              opacity={isOvernight ? 0.7 : 0.8}
+              dashArray={isOvernight ? [8, 6] : undefined} // Dashed line for overnight routes
             />
           );
         })}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2, Upload, Download, PlaneTakeoff, Train } from "lucide-react";
+import { Plane, Sparkles, X, PanelLeftClose, PanelLeft, Maximize2, Minimize2, Upload, Download, PlaneTakeoff, Train, Hotel } from "lucide-react";
 import { LocationSearch } from "./LocationSearch";
 import { TripStopsList } from "./TripStopsList";
 import { TripMap } from "./TripMap";
@@ -10,8 +10,17 @@ import { ExportItinerary } from "./ExportItinerary";
 import { FlightInput } from "./FlightInput";
 import { TrainInput } from "./TrainInput";
 import { Button } from "@/components/ui/button";
-import type { TripLocation, RouteInfo, GeminiResponse, GeocodeResult, FlightInfo, TrainInfo } from "@/types/trip";
+import type { TripLocation, RouteInfo, GeminiResponse, GeocodeResult, FlightInfo, TrainInfo, AccommodationSuggestion } from "@/types/trip";
 import { calculateDistance } from "@/lib/utils";
+
+interface OvernightRoute {
+  fromDay: number;
+  toDay: number;
+  fromLocation: string;
+  toLocation: string;
+  distance: number;
+  duration: number;
+}
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 9);
@@ -36,6 +45,9 @@ export function TripPlanner() {
   const [flights, setFlights] = useState<FlightInfo[]>([]);
   const [trains, setTrains] = useState<TrainInfo[]>([]);
   const [editingFlight, setEditingFlight] = useState<FlightInfo | null>(null);
+  const [overnightRoutes, setOvernightRoutes] = useState<OvernightRoute[]>([]);
+  const [accommodationSuggestions, setAccommodationSuggestions] = useState<Map<string, AccommodationSuggestion[]>>(new Map());
+  const [loadingAccommodations, setLoadingAccommodations] = useState<Set<string>>(new Set());
 
   // Fetch route between two points using OSRM
   const fetchRoute = useCallback(async (
@@ -273,10 +285,13 @@ export function TripPlanner() {
         
         if (route) {
           route.isCrossDay = true;
+          route.isOvernight = true; // Also set isOvernight for compatibility
           route.fromDay = currentDay;
           route.toDay = nextDay;
+          route.startLocationName = lastOfCurrentDay.name;
+          route.endLocationName = firstOfNextDay.name;
           newLandRoutes.push(route);
-          console.log(`✓ Created cross-day route: Day ${currentDay} → Day ${nextDay}`);
+          console.log(`✓ Created cross-day route: Day ${currentDay} → Day ${nextDay} (${lastOfCurrentDay.name} → ${firstOfNextDay.name})`);
         }
       } else {
         console.log(`⚠ Skipping cross-day route: Day ${currentDay} → Day ${nextDay} (no locations)`);
@@ -285,12 +300,79 @@ export function TripPlanner() {
     
     console.log(`Calculated ${newLandRoutes.length} land routes (${newLandRoutes.filter(r => r.isCrossDay).length} cross-day)`);
     
+    // Extract overnight route information for accommodation suggestions
+    const overnight: OvernightRoute[] = newLandRoutes
+      .filter(r => r.isCrossDay || r.isOvernight)
+      .map(r => ({
+        fromDay: r.fromDay || 1,
+        toDay: r.toDay || 2,
+        fromLocation: r.startLocationName || '',
+        toLocation: r.endLocationName || '',
+        distance: r.distance,
+        duration: r.duration,
+      }));
+    
+    setOvernightRoutes(overnight);
+    
     // Update routes: preserve existing flight routes, replace land routes
     setRoutes(prevRoutes => {
       const existingFlightRoutes = prevRoutes.filter(r => r.isFlight);
       return [...existingFlightRoutes, ...newLandRoutes];
     });
   }, [fetchRoute, flights]);
+
+  // Fetch AI-powered accommodation suggestions for overnight routes
+  const fetchAccommodationSuggestions = useCallback(async (overnightRoute: OvernightRoute) => {
+    const key = `${overnightRoute.fromDay}-${overnightRoute.toDay}`;
+    
+    // Don't fetch if already loading or already have suggestions
+    if (loadingAccommodations.has(key) || accommodationSuggestions.has(key)) {
+      return;
+    }
+    
+    // Don't fetch if we don't have location names
+    if (!overnightRoute.fromLocation || !overnightRoute.toLocation) {
+      console.log('Skipping accommodation fetch: missing location names');
+      return;
+    }
+    
+    setLoadingAccommodations(prev => new Set([...prev, key]));
+    
+    try {
+      const response = await fetch('/api/gemini-hotels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lastStopName: overnightRoute.fromLocation,
+          firstStopName: overnightRoute.toLocation,
+          distance: overnightRoute.distance,
+          fromDay: overnightRoute.fromDay,
+          toDay: overnightRoute.toDay,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch suggestions');
+      }
+
+      const data = await response.json();
+      if (data.accommodations) {
+        setAccommodationSuggestions(prev => {
+          const newMap = new Map(prev);
+          newMap.set(key, data.accommodations);
+          return newMap;
+        });
+      }
+    } catch (error) {
+      console.error('Accommodation search error:', error);
+    } finally {
+      setLoadingAccommodations(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(key);
+        return newSet;
+      });
+    }
+  }, [accommodationSuggestions, loadingAccommodations]);
 
   // Add a location from geocode result
   const handleLocationSelect = useCallback(async (result: GeocodeResult) => {
@@ -1250,6 +1332,10 @@ export function TripPlanner() {
               onVisibleDaysChange={setVisibleDays}
               visibleTypes={visibleTypes}
               onVisibleTypesChange={setVisibleTypes}
+              overnightRoutes={overnightRoutes}
+              accommodationSuggestions={accommodationSuggestions}
+              loadingAccommodations={loadingAccommodations}
+              onFetchAccommodations={fetchAccommodationSuggestions}
             />
           </div>
         </aside>
