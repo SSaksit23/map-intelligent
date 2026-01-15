@@ -308,23 +308,40 @@ export function TripStopsList({
 
   // Build a route lookup map based on actual route data
   const getRouteForLocation = (locationId: string, locationIndex: number, locationDay: number) => {
-    // Find the next location in the same day
-    const currentLoc = locations.find(l => l.id === locationId);
-    if (!currentLoc) return null;
+    // Find the current location and the next location in the same day
+    const dayLocs = locationsByDay[locationDay] || [];
+    const currentLocIndexInDay = dayLocs.findIndex(l => l.id === locationId);
     
-    // Get the index of this location in the sorted locations array
-    const locIdx = locations.findIndex(l => l.id === locationId);
-    if (locIdx === -1 || locIdx >= locations.length - 1) return null;
+    if (currentLocIndexInDay === -1 || currentLocIndexInDay >= dayLocs.length - 1) return null;
     
-    const nextLoc = locations[locIdx + 1];
-    if (!nextLoc || (nextLoc.day || 1) !== (currentLoc.day || 1)) return null;
+    const currentLoc = dayLocs[currentLocIndexInDay];
+    const nextLoc = dayLocs[currentLocIndexInDay + 1];
     
-    // Find the matching route (non-flight, non-cross-day)
-    const matchingRoute = routes.find((r, idx) => {
-      if (r.isFlight || r.isCrossDay) return false;
-      // Match by checking if this route is at the expected index
-      // Routes are created in order for within-day connections
-      return idx === locIdx;
+    if (!currentLoc || !nextLoc) return null;
+    
+    // Skip if either is an airport or station (they use different routes)
+    if (currentLoc.type === 'airport' || nextLoc.type === 'airport') return null;
+    if (currentLoc.type === 'station' || nextLoc.type === 'station') return null;
+    
+    // Find the matching route by comparing start/end coordinates
+    const matchingRoute = routes.find((r) => {
+      if (r.isFlight || r.isCrossDay || r.isOvernight) return false;
+      if (!r.coordinates || r.coordinates.length < 2) return false;
+      
+      // Route coordinates are [lng, lat] format
+      const routeStart = r.coordinates[0];
+      const routeEnd = r.coordinates[r.coordinates.length - 1];
+      
+      // Check if route matches this location pair (with small tolerance for floating point)
+      const tolerance = 0.001; // ~100m tolerance
+      const startMatches = 
+        Math.abs(routeStart[0] - currentLoc.coordinates.lng) < tolerance &&
+        Math.abs(routeStart[1] - currentLoc.coordinates.lat) < tolerance;
+      const endMatches = 
+        Math.abs(routeEnd[0] - nextLoc.coordinates.lng) < tolerance &&
+        Math.abs(routeEnd[1] - nextLoc.coordinates.lat) < tolerance;
+      
+      return startMatches && endMatches;
     });
     
     return matchingRoute || null;
