@@ -17,6 +17,9 @@ export interface RouteInfo {
   duration: number; // seconds
   distance: number; // meters
   isFlight?: boolean; // Whether this is a flight route
+  isCrossDay?: boolean; // Whether this route connects two different days
+  fromDay?: number; // Starting day for cross-day routes
+  toDay?: number; // Ending day for cross-day routes
 }
 
 export interface FlightInfo {

@@ -36,6 +36,7 @@ interface DocumentUploadProps {
       coordinates: { lat: number; lng: number };
       type: string;
       day?: number;
+      order?: number; // Order from crew output for proper sequencing
     }>;
     flights?: ExtractedFlight[];
     trains?: ExtractedTrain[];

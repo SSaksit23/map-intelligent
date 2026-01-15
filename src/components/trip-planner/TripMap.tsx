@@ -181,9 +181,34 @@ export function TripMap({
     return R * c;
   };
   
+  // Group locations by day for cross-day detection
+  const locationsByDay = useMemo(() => {
+    const map = new Map<number, TripLocation[]>();
+    locations.forEach(loc => {
+      const day = loc.day || 1;
+      if (!map.has(day)) {
+        map.set(day, []);
+      }
+      map.get(day)!.push(loc);
+    });
+    return map;
+  }, [locations]);
+
+  // Helper to check if a location is the last of its day
+  const isLastOfDay = (loc: TripLocation) => {
+    const dayLocs = locationsByDay.get(loc.day || 1) || [];
+    return dayLocs.length > 0 && dayLocs[dayLocs.length - 1].id === loc.id;
+  };
+
+  // Helper to check if a location is the first of its day
+  const isFirstOfDay = (loc: TripLocation) => {
+    const dayLocs = locationsByDay.get(loc.day || 1) || [];
+    return dayLocs.length > 0 && dayLocs[0].id === loc.id;
+  };
+
   // Build mapping from land route index to location pair
   const routeToLocationPair = useMemo(() => {
-    const mapping: Array<{ startLoc: TripLocation; endLoc: TripLocation }> = [];
+    const mapping: Array<{ startLoc: TripLocation; endLoc: TripLocation; isCrossDay?: boolean }> = [];
     let routeIdx = 0;
     
     for (let i = 0; i < locations.length - 1; i++) {
@@ -201,8 +226,18 @@ export function TripMap({
         continue;
       }
       
-      // Skip if different days
+      // Handle cross-day routes (last of day N → first of day N+1)
       if (startLoc.day !== endLoc.day) {
+        const startDay = startLoc.day || 1;
+        const endDay = endLoc.day || 1;
+        
+        // Only allow cross-day if it's last→first and consecutive days
+        if (isLastOfDay(startLoc) && isFirstOfDay(endLoc) && endDay === startDay + 1) {
+          if (routeIdx < landRoutes.length) {
+            mapping.push({ startLoc, endLoc, isCrossDay: true });
+            routeIdx++;
+          }
+        }
         continue;
       }
       
@@ -213,15 +248,17 @@ export function TripMap({
     }
     
     return mapping;
-  }, [locations, landRoutes]);
+  }, [locations, landRoutes, locationsByDay]);
 
   // Filter land routes based on visible days AND visible types
   const filteredRoutes = useMemo(() => {
-    return landRoutes.filter((_, index) => {
+    return landRoutes.map((route, index) => {
       const pair = routeToLocationPair[index];
+      return { route, pair, index };
+    }).filter(({ pair }) => {
       if (!pair) return true;
       
-      // Check day visibility
+      // Check day visibility - for cross-day routes, both days must be visible
       if (visibleDays) {
         if (!visibleDays.has(pair.startLoc.day || 1) || !visibleDays.has(pair.endLoc.day || 1)) {
           return false;
@@ -304,30 +341,6 @@ export function TripMap({
     }
   }, [validLocations]);
 
-  // Get day color for route (use the starting location's day from original locations array)
-  const getRouteColor = (filteredRouteIndex: number) => {
-    // Find the original route index
-    let originalIndex = 0;
-    let filteredCount = 0;
-    
-    for (let i = 0; i < routes.length; i++) {
-      const startLoc = locations[i];
-      const endLoc = locations[i + 1];
-      if (startLoc && endLoc && visibleDays?.has(startLoc.day || 1) && visibleDays?.has(endLoc.day || 1)) {
-        if (filteredCount === filteredRouteIndex) {
-          originalIndex = i;
-          break;
-        }
-        filteredCount++;
-      }
-    }
-    
-    if (originalIndex < locations.length) {
-      return getDayColor(locations[originalIndex]?.day).bg;
-    }
-    return "#6366f1";
-  };
-
   const StyleIcon = mapStyles[currentStyle].icon;
 
   return (
@@ -344,15 +357,21 @@ export function TripMap({
         <MapControls position="bottom-right" showZoom showLocate showFullscreen />
 
         {/* Render land routes with day-based colors */}
-        {filteredRoutes.map((route, index) => (
-          <MapRoute
-            key={`route-${index}`}
-            coordinates={route.coordinates}
-            color={getRouteColor(index)}
-            width={4}
-            opacity={0.8}
-          />
-        ))}
+        {filteredRoutes.map(({ route, pair, index }) => {
+          const isCrossDay = pair?.isCrossDay;
+          const startDayColor = getDayColor(pair?.startLoc.day || 1).bg;
+          
+          return (
+            <MapRoute
+              key={`route-${index}`}
+              coordinates={route.coordinates}
+              color={isCrossDay ? "#a855f7" : startDayColor} // Purple for cross-day routes
+              width={isCrossDay ? 3 : 4}
+              opacity={isCrossDay ? 0.7 : 0.8}
+              dashArray={isCrossDay ? [10, 5] : undefined} // Dashed for cross-day
+            />
+          );
+        })}
 
         {/* Render flight routes as curved arcs */}
         {flightRoutes.map(({ flight, coordinates }) => (

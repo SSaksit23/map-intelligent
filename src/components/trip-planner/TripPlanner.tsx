@@ -116,6 +116,25 @@ export function TripPlanner() {
     // Use provided flights or get from state
     const flightsList = currentFlights || flights;
     
+    // IMPORTANT: Sort locations by day first, then by order within each day
+    // This ensures cross-day connections work properly
+    const sortedLocs = [...locs].sort((a, b) => {
+      const dayA = a.day || 1;
+      const dayB = b.day || 1;
+      if (dayA !== dayB) {
+        return dayA - dayB;
+      }
+      // Within the same day, sort by order
+      return (a.order || 0) - (b.order || 0);
+    });
+    
+    console.log("Calculating routes for sorted locations:", sortedLocs.map(l => ({
+      name: l.name.substring(0, 30),
+      day: l.day,
+      order: l.order,
+      type: l.type,
+    })));
+    
     // Build a set of location IDs that are flight-related (departure/arrival airports)
     const flightLocationIds = new Set<string>();
     flightsList.forEach(f => {
@@ -123,69 +142,118 @@ export function TripPlanner() {
       flightLocationIds.add(`${f.id}-arr`);
     });
     
-    // Build a set of location pairs to skip (flight-connected pairs)
-    const skipPairs = new Set<string>();
+    // Group locations by day for cross-day connection detection
+    const locationsByDay = new Map<number, TripLocation[]>();
+    sortedLocs.forEach(loc => {
+      const day = loc.day || 1;
+      if (!locationsByDay.has(day)) {
+        locationsByDay.set(day, []);
+      }
+      locationsByDay.get(day)!.push(loc);
+    });
     
-    for (let i = 0; i < locs.length - 1; i++) {
-      const loc = locs[i];
-      const nextLoc = locs[i + 1];
-      
-      // Skip if both are flight-related locations (airports from flights)
-      if (flightLocationIds.has(loc.id) && flightLocationIds.has(nextLoc.id)) {
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
-      
-      // Skip if both locations are airports
-      if (loc.type === 'airport' && nextLoc.type === 'airport') {
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
-      
-      // Skip if these are consecutive airports that are part of the same flight
-      const locIsFlightDep = loc.id.includes('-dep') && loc.id.startsWith('flight-');
-      const nextLocIsFlightArr = nextLoc.id.includes('-arr') && nextLoc.id.startsWith('flight-');
-      
-      if (locIsFlightDep && nextLocIsFlightArr) {
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
-      
-      // Skip if either location is an airport (arrival/departure)
-      // This prevents land routes connecting to/from airports
-      if (loc.type === 'airport' || nextLoc.type === 'airport') {
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
-      
-      // Skip if locations are too far apart for land travel (> 1000 km)
-      // These should be connected by flights instead
-      const distance = calculateDistance(loc.coordinates, nextLoc.coordinates);
-      if (distance > MAX_LAND_ROUTE_DISTANCE) {
-        console.log(`Skipping land route: ${loc.name} to ${nextLoc.name} (${Math.round(distance/1000)}km - too far for land travel)`);
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
-      
-      // Skip if locations are on different days (prevents cross-day land routes)
-      if (loc.day !== nextLoc.day) {
-        skipPairs.add(`${i}-${i + 1}`);
-        continue;
-      }
+    // Get sorted days
+    const sortedDays = Array.from(locationsByDay.keys()).sort((a, b) => a - b);
+    console.log(`Days found: ${sortedDays.join(", ")}`);
+    
+    // Build a flat array of locations in the correct order:
+    // Day 1 locations in order, then Day 2 locations in order, etc.
+    const orderedLocs: TripLocation[] = [];
+    for (const day of sortedDays) {
+      const dayLocs = locationsByDay.get(day) || [];
+      // Sort by order within the day
+      dayLocs.sort((a, b) => (a.order || 0) - (b.order || 0));
+      orderedLocs.push(...dayLocs);
     }
-
+    
+    // Helper to check if a location is the last of its day
+    const isLastOfDay = (loc: TripLocation) => {
+      const day = loc.day || 1;
+      const dayLocs = locationsByDay.get(day) || [];
+      return dayLocs.length > 0 && dayLocs[dayLocs.length - 1].id === loc.id;
+    };
+    
+    // Helper to check if a location is the first of its day
+    const isFirstOfDay = (loc: TripLocation) => {
+      const day = loc.day || 1;
+      const dayLocs = locationsByDay.get(day) || [];
+      return dayLocs.length > 0 && dayLocs[0].id === loc.id;
+    };
+    
+    // Calculate routes within each day
     const newLandRoutes: RouteInfo[] = [];
-    for (let i = 0; i < locs.length - 1; i++) {
-      // Skip if this pair should not have a land route
-      if (skipPairs.has(`${i}-${i + 1}`)) {
-        continue;
-      }
+    
+    for (const day of sortedDays) {
+      const dayLocs = locationsByDay.get(day) || [];
+      console.log(`Processing Day ${day}: ${dayLocs.length} locations`);
       
-      const route = await fetchRoute(locs[i].coordinates, locs[i + 1].coordinates);
-      if (route) {
-        newLandRoutes.push(route);
+      // Calculate routes between consecutive locations within the same day
+      for (let i = 0; i < dayLocs.length - 1; i++) {
+        const loc = dayLocs[i];
+        const nextLoc = dayLocs[i + 1];
+        
+        // Skip flight-related pairs
+        if (flightLocationIds.has(loc.id) && flightLocationIds.has(nextLoc.id)) {
+          continue;
+        }
+        
+        // Skip airport connections
+        if (loc.type === 'airport' || nextLoc.type === 'airport') {
+          continue;
+        }
+        
+        // Skip if too far apart for land travel
+        const distance = calculateDistance(loc.coordinates, nextLoc.coordinates);
+        if (distance > MAX_LAND_ROUTE_DISTANCE) {
+          console.log(`Skipping land route: ${loc.name} to ${nextLoc.name} (${Math.round(distance/1000)}km - too far)`);
+          continue;
+        }
+        
+        console.log(`Route: ${loc.name} → ${nextLoc.name} (Day ${day})`);
+        const route = await fetchRoute(loc.coordinates, nextLoc.coordinates);
+        if (route) {
+          newLandRoutes.push(route);
+        }
       }
     }
+    
+    // Calculate cross-day routes (last location of day N to first location of day N+1)
+    for (let i = 0; i < sortedDays.length - 1; i++) {
+      const currentDay = sortedDays[i];
+      const nextDay = sortedDays[i + 1];
+      
+      const currentDayLocs = locationsByDay.get(currentDay) || [];
+      const nextDayLocs = locationsByDay.get(nextDay) || [];
+      
+      if (currentDayLocs.length > 0 && nextDayLocs.length > 0) {
+        const lastOfCurrentDay = currentDayLocs[currentDayLocs.length - 1];
+        const firstOfNextDay = nextDayLocs[0];
+        
+        // Skip if either is an airport
+        if (lastOfCurrentDay.type === 'airport' || firstOfNextDay.type === 'airport') {
+          console.log(`Skipping cross-day route (airport): Day ${currentDay} → Day ${nextDay}`);
+          continue;
+        }
+        
+        // Check distance
+        const distance = calculateDistance(lastOfCurrentDay.coordinates, firstOfNextDay.coordinates);
+        if (distance > MAX_LAND_ROUTE_DISTANCE) {
+          console.log(`Skipping cross-day route (too far): ${lastOfCurrentDay.name} → ${firstOfNextDay.name} (${Math.round(distance/1000)}km)`);
+          continue;
+        }
+        
+        console.log(`Cross-day route: ${lastOfCurrentDay.name} (Day ${currentDay}) → ${firstOfNextDay.name} (Day ${nextDay})`);
+        const route = await fetchRoute(lastOfCurrentDay.coordinates, firstOfNextDay.coordinates);
+        if (route) {
+          route.isCrossDay = true;
+          route.fromDay = currentDay;
+          route.toDay = nextDay;
+          newLandRoutes.push(route);
+        }
+      }
+    }
+    
+    console.log(`Calculated ${newLandRoutes.length} land routes (${newLandRoutes.filter(r => r.isCrossDay).length} cross-day)`);
     
     // Update routes: preserve existing flight routes, replace land routes
     setRoutes(prevRoutes => {
@@ -445,6 +513,7 @@ export function TripPlanner() {
       coordinates: { lat: number; lng: number };
       type: string;
       day?: number;
+      order?: number; // Order from crew output
     }>;
     flights?: Array<{
       flightNumber: string;
@@ -485,18 +554,41 @@ export function TripPlanner() {
         loc.coordinates.lng !== 0
       );
       
-      const newLocations: TripLocation[] = validDataLocations.map((loc, index) => ({
-        id: generateId(),
-        name: loc.name,
-        description: loc.description,
-        address: loc.address,
-        coordinates: loc.coordinates,
-        type: loc.type as TripLocation["type"],
-        day: loc.day || 1,
-        order: locations.length + index,
-      }));
+      // Sort by day, then by order (from crew output) to preserve sequence
+      const sortedLocations = [...validDataLocations].sort((a, b) => {
+        const dayA = a.day || 1;
+        const dayB = b.day || 1;
+        if (dayA !== dayB) return dayA - dayB;
+        // Use order from crew output, fallback to original array index
+        const orderA = a.order ?? Infinity;
+        const orderB = b.order ?? Infinity;
+        return orderA - orderB;
+      });
+      
+      // Assign sequential order numbers within each day
+      const orderByDay = new Map<number, number>();
+      const newLocations: TripLocation[] = sortedLocations.map((loc) => {
+        const day = loc.day || 1;
+        const currentOrder = orderByDay.get(day) ?? 0;
+        orderByDay.set(day, currentOrder + 1);
+        
+        return {
+          id: generateId(),
+          name: loc.name,
+          description: loc.description,
+          address: loc.address,
+          coordinates: loc.coordinates,
+          type: loc.type as TripLocation["type"],
+          day: day,
+          order: locations.length + currentOrder + (day - 1) * 100, // Offset by day to maintain global order
+        };
+      });
+      
       allNewLocations = [...allNewLocations, ...newLocations];
       allDays.push(...newLocations.map(l => l.day || 1));
+      
+      console.log(`Processed ${newLocations.length} locations from document:`, 
+        newLocations.map(l => ({ name: l.name.substring(0, 30), day: l.day, order: l.order })));
       
       // Log if any locations were filtered out
       const filteredCount = data.locations.length - validDataLocations.length;
