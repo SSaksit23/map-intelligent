@@ -153,17 +153,34 @@ export async function POST(request: Request) {
 
     // Process document through the agent pipeline
     console.log("[API] Starting agent pipeline execution");
-    const result = await crew.processDocument({
-      text: documentText,
-      imageData,
-      documentType,
+    console.log("[API] Input data:", { 
+      hasText: !!documentText, 
+      textLength: documentText?.length || 0,
+      hasImage: !!imageData,
+      documentType 
     });
+    
+    let result;
+    try {
+      result = await crew.processDocument({
+        text: documentText,
+        imageData,
+        documentType,
+      });
+    } catch (crewError) {
+      console.error("[API] Crew execution error:", crewError);
+      return NextResponse.json(
+        { error: "Agent pipeline failed", details: String(crewError) },
+        { status: 500 }
+      );
+    }
 
     console.log("[API] Agent pipeline complete", {
       locations: result.locations.length,
       flights: result.flights.length,
       trains: result.trains.length,
       distances: result.distances.length,
+      message: result.message,
     });
 
     // Return the result in the expected format

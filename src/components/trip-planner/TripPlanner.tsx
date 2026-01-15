@@ -217,7 +217,9 @@ export function TripPlanner() {
       }
     }
     
-    // Calculate cross-day routes (last location of day N to first location of day N+1)
+    // Calculate cross-day routes (last NON-AIRPORT location of day N to first NON-AIRPORT location of day N+1)
+    console.log(`Calculating cross-day routes for ${sortedDays.length} days: ${sortedDays.join(', ')}`);
+    
     for (let i = 0; i < sortedDays.length - 1; i++) {
       const currentDay = sortedDays[i];
       const nextDay = sortedDays[i + 1];
@@ -225,31 +227,59 @@ export function TripPlanner() {
       const currentDayLocs = locationsByDay.get(currentDay) || [];
       const nextDayLocs = locationsByDay.get(nextDay) || [];
       
+      console.log(`Day ${currentDay}: ${currentDayLocs.length} locations, Day ${nextDay}: ${nextDayLocs.length} locations`);
+      
       if (currentDayLocs.length > 0 && nextDayLocs.length > 0) {
-        const lastOfCurrentDay = currentDayLocs[currentDayLocs.length - 1];
-        const firstOfNextDay = nextDayLocs[0];
+        // Find the last NON-AIRPORT, NON-STATION location of the current day
+        // If all locations are airports/stations, fall back to using the last location
+        const nonTransportCurrentDay = currentDayLocs.filter(
+          loc => loc.type !== 'airport' && loc.type !== 'station'
+        );
+        const nonTransportNextDay = nextDayLocs.filter(
+          loc => loc.type !== 'airport' && loc.type !== 'station'
+        );
         
-        // Skip if either is an airport
-        if (lastOfCurrentDay.type === 'airport' || firstOfNextDay.type === 'airport') {
-          console.log(`Skipping cross-day route (airport): Day ${currentDay} → Day ${nextDay}`);
-          continue;
-        }
+        // Use non-transport locations if available, otherwise fall back to all locations
+        const lastOfCurrentDay = nonTransportCurrentDay.length > 0 
+          ? nonTransportCurrentDay[nonTransportCurrentDay.length - 1]
+          : currentDayLocs[currentDayLocs.length - 1];
+        const firstOfNextDay = nonTransportNextDay.length > 0
+          ? nonTransportNextDay[0]
+          : nextDayLocs[0];
         
-        // Check distance
+        // Calculate distance
         const distance = calculateDistance(lastOfCurrentDay.coordinates, firstOfNextDay.coordinates);
-        if (distance > MAX_LAND_ROUTE_DISTANCE) {
-          console.log(`Skipping cross-day route (too far): ${lastOfCurrentDay.name} → ${firstOfNextDay.name} (${Math.round(distance/1000)}km)`);
-          continue;
+        console.log(`Cross-day distance: ${lastOfCurrentDay.name} → ${firstOfNextDay.name} = ${Math.round(distance/1000)}km`);
+        
+        // For cross-day routes, we ALWAYS create a connection (even for long distances)
+        // For very long distances, use a direct line instead of road routing
+        let route: RouteInfo | null = null;
+        
+        if (distance <= MAX_LAND_ROUTE_DISTANCE) {
+          // Normal distance - get actual road route
+          route = await fetchRoute(lastOfCurrentDay.coordinates, firstOfNextDay.coordinates);
+        } else {
+          // Long distance - create a direct line route
+          console.log(`Using direct line for long cross-day route (${Math.round(distance/1000)}km)`);
+          route = {
+            coordinates: [
+              [lastOfCurrentDay.coordinates.lng, lastOfCurrentDay.coordinates.lat],
+              [firstOfNextDay.coordinates.lng, firstOfNextDay.coordinates.lat],
+            ],
+            duration: Math.round((distance / 1000) / 80 * 3600), // Estimate at 80km/h
+            distance: distance,
+          };
         }
         
-        console.log(`Cross-day route: ${lastOfCurrentDay.name} (Day ${currentDay}) → ${firstOfNextDay.name} (Day ${nextDay})`);
-        const route = await fetchRoute(lastOfCurrentDay.coordinates, firstOfNextDay.coordinates);
         if (route) {
           route.isCrossDay = true;
           route.fromDay = currentDay;
           route.toDay = nextDay;
           newLandRoutes.push(route);
+          console.log(`✓ Created cross-day route: Day ${currentDay} → Day ${nextDay}`);
         }
+      } else {
+        console.log(`⚠ Skipping cross-day route: Day ${currentDay} → Day ${nextDay} (no locations)`);
       }
     }
     
@@ -406,34 +436,63 @@ export function TripPlanner() {
 
   // Reorder locations
   const handleReorder = useCallback(async (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    
     const newLocations = [...locations];
     const [removed] = newLocations.splice(fromIndex, 1);
     newLocations.splice(toIndex, 0, removed);
-    setLocations(newLocations);
-    await calculateRoutes(newLocations);
+    
+    // Update order values to reflect new positions
+    const updatedLocations = newLocations.map((loc, idx) => ({
+      ...loc,
+      order: idx,
+    }));
+    
+    setLocations(updatedLocations);
+    await calculateRoutes(updatedLocations);
   }, [locations, calculateRoutes]);
 
   // Change location day
   const handleDayChange = useCallback(async (locationId: string, newDay: number) => {
+    const location = locations.find(l => l.id === locationId);
+    if (!location || location.day === newDay) return;
+    
     const newLocations = locations.map(loc => 
       loc.id === locationId ? { ...loc, day: newDay } : loc
     );
+    
     // Sort by day, then by original order within day
     newLocations.sort((a, b) => {
       if ((a.day || 1) !== (b.day || 1)) {
         return (a.day || 1) - (b.day || 1);
       }
-      return a.order - b.order;
+      return (a.order || 0) - (b.order || 0);
     });
-    setLocations(newLocations);
-    await calculateRoutes(newLocations);
+    
+    // Update order values to reflect new positions
+    const updatedLocations = newLocations.map((loc, idx) => ({
+      ...loc,
+      order: idx,
+    }));
+    
+    setLocations(updatedLocations);
+    await calculateRoutes(updatedLocations);
   }, [locations, calculateRoutes]);
 
-  // Add a new day
+  // Add a new day - find the first missing day number
   const handleAddDay = useCallback(() => {
-    const maxDay = Math.max(...days, 0);
-    const newDay = maxDay + 1;
-    setDays([...days, newDay]);
+    // Find the first missing day number (e.g., if days are [1, 8], add 2)
+    const sortedDays = [...days].sort((a, b) => a - b);
+    let newDay = 1;
+    
+    for (let i = 0; i < sortedDays.length; i++) {
+      if (sortedDays[i] > newDay) {
+        break; // Found a gap
+      }
+      newDay = sortedDays[i] + 1;
+    }
+    
+    setDays([...days, newDay].sort((a, b) => a - b));
     setVisibleDays(prev => new Set([...prev, newDay]));
   }, [days]);
 

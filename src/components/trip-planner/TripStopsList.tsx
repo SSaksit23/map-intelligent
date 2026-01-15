@@ -112,6 +112,8 @@ export function TripStopsList({
   const [dragOverDay, setDragOverDay] = useState<number | null>(null);
   const [draggedDay, setDraggedDay] = useState<number | null>(null);
   const [dragOverDayTarget, setDragOverDayTarget] = useState<number | null>(null);
+  const [dragOverItem, setDragOverItem] = useState<string | null>(null); // Track which item is being dragged over
+  const [dragOverPosition, setDragOverPosition] = useState<'above' | 'below' | null>(null); // Position relative to item
   const [dayInputs, setDayInputs] = useState<Record<number, string>>({});
   const [activeDayInput, setActiveDayInput] = useState<number | null>(null);
   const [showTypeFilter, setShowTypeFilter] = useState(false);
@@ -286,10 +288,33 @@ export function TripStopsList({
     return acc;
   }, {} as Record<number, TripLocation[]>);
 
-  // Create a map of location index to route
-  const getRouteForLocation = (locationId: string) => {
-    const locIndex = locations.findIndex(l => l.id === locationId);
-    return locIndex >= 0 && locIndex < routes.length ? routes[locIndex] : null;
+  // Build a route lookup map based on actual route data
+  const getRouteForLocation = (locationId: string, locationIndex: number, locationDay: number) => {
+    // Find the next location in the same day
+    const currentLoc = locations.find(l => l.id === locationId);
+    if (!currentLoc) return null;
+    
+    // Get the index of this location in the sorted locations array
+    const locIdx = locations.findIndex(l => l.id === locationId);
+    if (locIdx === -1 || locIdx >= locations.length - 1) return null;
+    
+    const nextLoc = locations[locIdx + 1];
+    if (!nextLoc || (nextLoc.day || 1) !== (currentLoc.day || 1)) return null;
+    
+    // Find the matching route (non-flight, non-cross-day)
+    const matchingRoute = routes.find((r, idx) => {
+      if (r.isFlight || r.isCrossDay) return false;
+      // Match by checking if this route is at the expected index
+      // Routes are created in order for within-day connections
+      return idx === locIdx;
+    });
+    
+    return matchingRoute || null;
+  };
+
+  // Get cross-day route between two days
+  const getCrossDayRoute = (fromDay: number, toDay: number) => {
+    return routes.find(r => r.isCrossDay && r.fromDay === fromDay && r.toDay === toDay);
   };
 
   const handleDragStart = (e: React.DragEvent, locationId: string) => {
@@ -301,6 +326,8 @@ export function TripStopsList({
   const handleDragEnd = () => {
     setDraggedItem(null);
     setDragOverDay(null);
+    setDragOverItem(null);
+    setDragOverPosition(null);
     dragCounter.current = 0;
   };
 
@@ -316,6 +343,131 @@ export function TripStopsList({
     }
   };
 
+  // Handle drag over an item - determine if above or below
+  const handleItemDragOver = (e: React.DragEvent, targetLocationId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!draggedItem || draggedItem === targetLocationId) {
+      setDragOverItem(null);
+      setDragOverPosition(null);
+      return;
+    }
+    
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const position = e.clientY < midY ? 'above' : 'below';
+    
+    setDragOverItem(targetLocationId);
+    setDragOverPosition(position);
+  };
+
+  const handleItemDragLeave = () => {
+    setDragOverItem(null);
+    setDragOverPosition(null);
+  };
+
+  // Handle drop on an item - reorder within day or move between days
+  const handleDropOnItem = (e: React.DragEvent, targetLocationId: string, targetDay: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const draggedLocationId = e.dataTransfer.getData("text/plain");
+    
+    // Calculate position directly from mouse position (more reliable than state)
+    const rect = e.currentTarget.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const position = e.clientY < midY ? 'above' : 'below';
+    
+    console.log('[TripStopsList] handleDropOnItem:', { draggedLocationId, targetLocationId, targetDay, position });
+    
+    if (!draggedLocationId || draggedLocationId === targetLocationId) {
+      console.log('[TripStopsList] Same item or no dragged item, skipping');
+      resetDragState();
+      return;
+    }
+    
+    const draggedLocation = locations.find(l => l.id === draggedLocationId);
+    const targetLocation = locations.find(l => l.id === targetLocationId);
+    
+    if (!draggedLocation || !targetLocation) {
+      console.log('[TripStopsList] Location not found:', { draggedLocation, targetLocation });
+      resetDragState();
+      return;
+    }
+    
+    const fromIndex = locations.findIndex(l => l.id === draggedLocationId);
+    const toIndex = locations.findIndex(l => l.id === targetLocationId);
+    
+    console.log('[TripStopsList] Indices:', { fromIndex, toIndex, draggedDay: draggedLocation.day, targetDay });
+    
+    // Determine the final insertion index
+    let insertIndex = toIndex;
+    if (position === 'below') {
+      insertIndex = toIndex + 1;
+    }
+    
+    // If moving to a different day, update the day first
+    if (draggedLocation.day !== targetDay) {
+      console.log('[TripStopsList] Moving to different day');
+      // Moving to a different day - update day and reorder
+      const newLocations = locations.filter(l => l.id !== draggedLocationId);
+      const updatedDraggedLocation = { ...draggedLocation, day: targetDay };
+      
+      // Find the correct insert position in the new array
+      const targetIndexInNew = newLocations.findIndex(l => l.id === targetLocationId);
+      const newInsertIndex = position === 'below' ? targetIndexInNew + 1 : targetIndexInNew;
+      
+      console.log('[TripStopsList] Cross-day reorder:', { targetIndexInNew, newInsertIndex });
+      
+      newLocations.splice(newInsertIndex, 0, updatedDraggedLocation);
+      
+      // Update order values
+      const updatedLocations = newLocations.map((loc, idx) => ({
+        ...loc,
+        order: idx,
+      }));
+      
+      // Call the parent handlers
+      onDayChange(draggedLocationId, targetDay);
+      // After day change, trigger reorder to position correctly
+      setTimeout(() => {
+        const newFromIndex = locations.findIndex(l => l.id === draggedLocationId);
+        if (newFromIndex !== newInsertIndex) {
+          onReorder(newFromIndex, newInsertIndex);
+        }
+      }, 10);
+    } else {
+      // Same day - just reorder
+      console.log('[TripStopsList] Same day reorder:', { fromIndex, toIndex, insertIndex, position });
+      
+      // Adjust index if dragging down (since we remove first then insert)
+      if (fromIndex < insertIndex) {
+        insertIndex--;
+      }
+      
+      console.log('[TripStopsList] Adjusted insertIndex:', insertIndex);
+      
+      if (fromIndex !== insertIndex) {
+        console.log('[TripStopsList] Calling onReorder:', { fromIndex, insertIndex });
+        onReorder(fromIndex, insertIndex);
+      } else {
+        console.log('[TripStopsList] No reorder needed (same position)');
+      }
+    }
+    
+    resetDragState();
+  };
+
+  // Reset all drag state
+  const resetDragState = () => {
+    setDraggedItem(null);
+    setDragOverDay(null);
+    setDragOverItem(null);
+    setDragOverPosition(null);
+    dragCounter.current = 0;
+  };
+
   const handleDropOnDay = (e: React.DragEvent, targetDay: number) => {
     e.preventDefault();
     const locationId = e.dataTransfer.getData("text/plain");
@@ -325,9 +477,7 @@ export function TripStopsList({
         onDayChange(locationId, targetDay);
       }
     }
-    setDraggedItem(null);
-    setDragOverDay(null);
-    dragCounter.current = 0;
+    resetDragState();
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -649,7 +799,7 @@ export function TripStopsList({
                       </div>
                     ) : dayLocations.length > 0 ? (
                       dayLocations.map((location, dayIndex) => {
-                        const routeToNext = getRouteForLocation(location.id);
+                        const routeToNext = getRouteForLocation(location.id, dayIndex, day);
                         const isHotel = location.type === "hotel";
                         const isAirport = location.type === "airport";
                         const isStation = location.type === "station";
@@ -658,18 +808,30 @@ export function TripStopsList({
                         // Use day-relative index (1-based)
                         const displayNumber = dayIndex + 1;
 
+                        const isDragOver = dragOverItem === location.id;
+                        const showDropAbove = isDragOver && dragOverPosition === 'above';
+                        const showDropBelow = isDragOver && dragOverPosition === 'below';
+
                         return (
-                          <div key={location.id}>
+                          <div key={location.id} className="relative">
+                            {/* Drop indicator - above */}
+                            {showDropAbove && (
+                              <div className="absolute -top-1 left-0 right-0 h-1 bg-primary rounded-full z-10 animate-pulse" />
+                            )}
                             <Card
                               draggable
                               onDragStart={(e) => handleDragStart(e, location.id)}
                               onDragEnd={handleDragEnd}
+                              onDragOver={(e) => handleItemDragOver(e, location.id)}
+                              onDragLeave={handleItemDragLeave}
+                              onDrop={(e) => handleDropOnItem(e, location.id, day)}
                               className={`
                                 p-2.5 cursor-pointer transition-all duration-200
                                 hover:bg-accent/50 
                                 ${dayColor.border} border-l-4
                                 ${selectedLocationId === location.id ? "ring-2 ring-primary bg-accent/30" : ""}
                                 ${isDragging ? "opacity-50 scale-95" : ""}
+                                ${isDragOver ? "ring-2 ring-primary/50" : ""}
                               `}
                               onClick={() => onLocationSelect(location.id)}
                             >
@@ -726,6 +888,10 @@ export function TripStopsList({
                                 </div>
                               </div>
                             </Card>
+                            {/* Drop indicator - below */}
+                            {showDropBelow && (
+                              <div className="absolute -bottom-1 left-0 right-0 h-1 bg-primary rounded-full z-10 animate-pulse" />
+                            )}
 
                             {/* Route info to next stop */}
                             {routeToNext && !isLastInDay && (
@@ -800,6 +966,58 @@ export function TripStopsList({
                         </Button>
                       )}
                     </div>
+
+                    {/* Cross-day route connection to next day */}
+                    {(() => {
+                      // Find the next day that has locations
+                      const sortedDaysList = [...days].sort((a, b) => a - b);
+                      const currentDayIndex = sortedDaysList.indexOf(day);
+                      const nextDay = currentDayIndex < sortedDaysList.length - 1 ? sortedDaysList[currentDayIndex + 1] : null;
+                      
+                      if (nextDay && dayLocations.length > 0) {
+                        const nextDayLocs = locationsByDay[nextDay] || [];
+                        if (nextDayLocs.length > 0) {
+                          const crossDayRoute = getCrossDayRoute(day, nextDay);
+                          const nextDayColor = getDayColor(nextDay);
+                          
+                          return (
+                            <div className="mt-3 pt-2 border-t border-purple-500/30">
+                              <div className="flex items-center gap-2 px-2 py-1.5 bg-purple-500/10 rounded-lg">
+                                <ArrowRight className="size-3.5 text-purple-400" />
+                                <div className="flex-1">
+                                  <div className="text-[10px] text-purple-300">
+                                    Continue to Day {nextDay}
+                                  </div>
+                                  {crossDayRoute ? (
+                                    <div className="flex items-center gap-2 text-[10px] text-purple-400 mt-0.5">
+                                      <span className="flex items-center gap-0.5">
+                                        <Route className="size-2.5" />
+                                        {formatDistance(crossDayRoute.distance)}
+                                      </span>
+                                      <span className="flex items-center gap-0.5">
+                                        <Clock className="size-2.5" />
+                                        {formatDuration(crossDayRoute.duration)}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <div className="text-[10px] text-purple-400/70 mt-0.5">
+                                      Route calculating...
+                                    </div>
+                                  )}
+                                </div>
+                                <div
+                                  className="size-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold"
+                                  style={{ backgroundColor: nextDayColor.bg }}
+                                >
+                                  {nextDay}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        }
+                      }
+                      return null;
+                    })()}
 
                     {/* Add Day After Button - only show on last visible day */}
                     {isLastVisibleDay && onAddDayAfter && (

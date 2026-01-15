@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useMemo } from "react";
 import {
-  Map,
+  Map as MapContainer,
   MapMarker,
   MarkerContent,
   MarkerLabel,
@@ -255,10 +255,25 @@ export function TripMap({
     return landRoutes.map((route, index) => {
       const pair = routeToLocationPair[index];
       return { route, pair, index };
-    }).filter(({ pair }) => {
+    }).filter(({ route, pair }) => {
+      // Handle cross-day routes directly using route properties
+      if (route.isCrossDay) {
+        // Cross-day routes: check if both fromDay and toDay are visible
+        if (visibleDays) {
+          const fromDay = route.fromDay || 1;
+          const toDay = route.toDay || 1;
+          if (!visibleDays.has(fromDay) || !visibleDays.has(toDay)) {
+            return false;
+          }
+        }
+        // Cross-day routes should always be visible regardless of type filters
+        return true;
+      }
+      
+      // Regular routes: use pair mapping
       if (!pair) return true;
       
-      // Check day visibility - for cross-day routes, both days must be visible
+      // Check day visibility
       if (visibleDays) {
         if (!visibleDays.has(pair.startLoc.day || 1) || !visibleDays.has(pair.endLoc.day || 1)) {
           return false;
@@ -345,7 +360,7 @@ export function TripMap({
 
   return (
     <div className="w-full h-full relative">
-      <Map
+      <MapContainer
         ref={mapRef}
         center={center}
         zoom={calculateZoom()}
@@ -358,14 +373,17 @@ export function TripMap({
 
         {/* Render land routes with day-based colors */}
         {filteredRoutes.map(({ route, pair, index }) => {
-          const isCrossDay = pair?.isCrossDay;
-          const startDayColor = getDayColor(pair?.startLoc.day || 1).bg;
+          // Use route.isCrossDay directly - it's set by TripPlanner.calculateRoutes
+          const isCrossDay = route.isCrossDay;
+          // For cross-day routes, use fromDay; for normal routes, use pair's day
+          const routeDay = isCrossDay ? (route.fromDay || 1) : (pair?.startLoc.day || 1);
+          const routeColor = isCrossDay ? "#a855f7" : getDayColor(routeDay).bg;
           
           return (
             <MapRoute
               key={`route-${index}`}
               coordinates={route.coordinates}
-              color={isCrossDay ? "#a855f7" : startDayColor} // Purple for cross-day routes
+              color={routeColor} // Purple for cross-day, day color otherwise
               width={isCrossDay ? 3 : 4}
               opacity={isCrossDay ? 0.7 : 0.8}
               dashArray={isCrossDay ? [10, 5] : undefined} // Dashed for cross-day
@@ -451,7 +469,7 @@ export function TripMap({
             </MapMarker>
           );
         })}
-      </Map>
+      </MapContainer>
 
       {/* Map Controls - Top Left */}
       <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">

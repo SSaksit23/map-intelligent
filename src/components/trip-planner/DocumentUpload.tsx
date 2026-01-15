@@ -138,17 +138,28 @@ export function DocumentUpload({ onDataExtracted, isOpen, onClose }: DocumentUpl
 
       setStatus("processing");
 
+      console.log("[DocumentUpload] Sending file to API:", selectedFile.name);
+      
       const response = await fetch("/api/extract-document", {
         method: "POST",
         body: formData,
       });
 
+      console.log("[DocumentUpload] API response status:", response.status);
+
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to process document");
+        console.error("[DocumentUpload] API error:", errorData);
+        throw new Error(errorData.error || errorData.details || "Failed to process document");
       }
 
       const data = await response.json();
+      console.log("[DocumentUpload] Received data:", {
+        locations: data.locations?.length || 0,
+        flights: data.flights?.length || 0,
+        trains: data.trains?.length || 0,
+        message: data.message,
+      });
 
       const locationCount = data.locations?.length || 0;
       const flightCount = data.flights?.length || 0;
