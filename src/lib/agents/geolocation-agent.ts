@@ -235,7 +235,7 @@ export class GeolocationAgent extends BaseAgent {
       const sourceData = translationResult || extractionResult;
 
       if (!sourceData) {
-        return this.error("No extraction or translation results available");
+        return this.error("No extraction or translation results available") as TaskResult<GeolocatedEntity[]>;
       }
 
       const geolocatedEntities: GeolocatedEntity[] = [];
@@ -361,7 +361,7 @@ export class GeolocationAgent extends BaseAgent {
       return this.success(geolocatedEntities, executionTime);
     } catch (error) {
       this.log("Geolocation failed", error);
-      return this.error(`Geolocation failed: ${error}`);
+      return this.error(`Geolocation failed: ${error}`) as TaskResult<GeolocatedEntity[]>;
     }
   }
 

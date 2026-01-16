@@ -65,7 +65,7 @@ export class TranslationAgent extends BaseAgent {
       const extractionResult = this.getPreviousResult<DocExtractionResult>("doc-extraction");
 
       if (!extractionResult) {
-        return this.error("No extraction results available for translation");
+        return this.error("No extraction results available for translation") as TaskResult<TranslationResult>;
       }
 
       // Detect language from entities
@@ -106,7 +106,7 @@ export class TranslationAgent extends BaseAgent {
       );
     } catch (error) {
       this.log("Translation failed", error);
-      return this.error(`Translation failed: ${error}`);
+      return this.error(`Translation failed: ${error}`) as TaskResult<TranslationResult>;
     }
   }
 

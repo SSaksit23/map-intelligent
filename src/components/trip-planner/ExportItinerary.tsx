@@ -52,35 +52,28 @@ export function ExportItinerary({
 
   if (!isOpen) return null;
 
-  // Group locations by day
-  const locationsByDay = days.reduce((acc, day) => {
-    acc[day] = locations.filter(l => (l.day || 1) === day);
-    return acc;
-  }, {} as Record<number, TripLocation[]>);
+  // Sort days array (memoized)
+  const sortedDays = useMemo(() => {
+    return [...days].sort((a, b) => a - b);
+  }, [days]);
 
-  // Helper to get the first location of the next day
-  const getFirstLocationOfNextDay = (currentDay: number) => {
-    const sortedDays = [...days].sort((a, b) => a - b);
+  // Group locations by day (memoized)
+  const locationsByDay = useMemo(() => {
+    return sortedDays.reduce((acc, day) => {
+      acc[day] = locations.filter(l => (l.day || 1) === day);
+      return acc;
+    }, {} as Record<number, TripLocation[]>);
+  }, [sortedDays, locations]);
+
+  // Helper to get the first location of the next day (memoized)
+  const getFirstLocationOfNextDay = useCallback((currentDay: number) => {
     const currentIndex = sortedDays.indexOf(currentDay);
     if (currentIndex === -1 || currentIndex >= sortedDays.length - 1) return null;
     
     const nextDay = sortedDays[currentIndex + 1];
     const nextDayLocations = locationsByDay[nextDay] || [];
     return nextDayLocations.length > 0 ? nextDayLocations[0] : null;
-  };
-
-  // Build a map of flight connections for quick lookup
-  const flightConnections = useMemo(() => {
-    const map = new Map<string, { distance: number; duration: number; isFlight: boolean }>();
-    flights.forEach(flight => {
-      const depId = `${flight.id}-dep`;
-      const arrId = `${flight.id}-arr`;
-      const distance = calculateDistance(flight.departure.coordinates, flight.arrival.coordinates);
-      const duration = flight.duration || estimateFlightDuration(distance / 1000);
-      map.set(`${depId}->${arrId}`, { distance, duration, isFlight: true });
-    });
-    return map;
-  }, [flights]);
+  }, [sortedDays, locationsByDay]);
 
   // Get route info between two consecutive locations
   const getRouteBetween = useCallback((fromLoc: TripLocation, toLoc: TripLocation) => {
@@ -153,7 +146,7 @@ export function ExportItinerary({
       }
       
       return null;
-  }, [locations, routes, flights, flightConnections]);
+  }, [locations, routes, flights]);
 
   // Calculate total stats (including cross-day routes)
   const { totalDistance, totalDuration } = useMemo(() => {
@@ -170,7 +163,6 @@ export function ExportItinerary({
     }
     
     // Add cross-day routes (last of day N to first of day N+1)
-    const sortedDays = [...days].sort((a, b) => a - b);
     for (let i = 0; i < sortedDays.length - 1; i++) {
       const currentDay = sortedDays[i];
       const nextDay = sortedDays[i + 1];
@@ -198,96 +190,116 @@ export function ExportItinerary({
     }
     
     return { totalDistance: distance, totalDuration: duration };
-  }, [locations, days, locationsByDay, getRouteBetween]);
+  }, [locations, sortedDays, locationsByDay, getRouteBetween]);
 
-  // Helper to get route to next location within the same day
-  const getRouteToNext = (location: TripLocation, dayLocations: TripLocation[], index: number) => {
+  // Helper to get route to next location within the same day (memoized)
+  const getRouteToNext = useCallback((location: TripLocation, dayLocations: TripLocation[], index: number) => {
     if (index >= dayLocations.length - 1) return null;
     const nextLoc = dayLocations[index + 1];
     return getRouteBetween(location, nextLoc);
-  };
+  }, [getRouteBetween]);
 
-  // Generate text content for export
-  const generateTextContent = () => {
-    let content = "═══════════════════════════════════════\n";
-    content += "        VOYAGE AI TRIP ITINERARY\n";
-    content += "═══════════════════════════════════════\n\n";
-    content += `📊 Trip Summary\n`;
-    content += `   Total Distance: ${formatDistance(totalDistance)}\n`;
-    content += `   Total Duration: ${formatDuration(totalDuration)}\n`;
-    content += `   Total Stops: ${locations.length}\n`;
-    content += `   Days: ${days.length}\n\n`;
+  // Generate text content for export (memoized)
+  const generateTextContent = useCallback(() => {
+    try {
+      let content = "═══════════════════════════════════════\n";
+      content += "        VOYAGE AI TRIP ITINERARY\n";
+      content += "═══════════════════════════════════════\n\n";
+      content += `📊 Trip Summary\n`;
+      content += `   Total Distance: ${formatDistance(totalDistance)}\n`;
+      content += `   Total Duration: ${formatDuration(totalDuration)}\n`;
+      content += `   Total Stops: ${locations.length}\n`;
+      content += `   Days: ${days.length}\n\n`;
 
-    days.forEach(day => {
-      const dayLocations = locationsByDay[day] || [];
-      
-      // Calculate day stats
-      let dayDistance = 0;
-      let dayDuration = 0;
-      dayLocations.forEach((loc, idx) => {
-        const route = getRouteToNext(loc, dayLocations, idx);
-        if (route) {
-          dayDistance += route.distance || 0;
-          dayDuration += route.duration || 0;
-        }
-      });
-
-      content += `───────────────────────────────────────\n`;
-      content += `📅 DAY ${day}\n`;
-      content += `   Distance: ${formatDistance(dayDistance)} | Duration: ${formatDuration(dayDuration)}\n`;
-      content += `───────────────────────────────────────\n\n`;
-
-      dayLocations.forEach((location, index) => {
-        const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
-        const route = getRouteToNext(location, dayLocations, index);
-        const isLast = index === dayLocations.length - 1;
-
-        content += `   ${globalIndex}. ${location.name.split(",")[0]}\n`;
-        if (location.description) {
-          content += `      ${location.description}\n`;
-        }
-        if (location.address) {
-          content += `      📍 ${location.address}\n`;
-        }
-        content += `      Type: ${location.type || "Location"}\n`;
-        if (location.coordinates?.lat && location.coordinates?.lng) {
-          content += `      Coordinates: ${location.coordinates.lat.toFixed(4)}, ${location.coordinates.lng.toFixed(4)}\n`;
-        }
-
-        if (route && !isLast) {
-          const emoji = route.isFlight ? "✈️" : "↓";
-          content += `\n      ${emoji} ${formatDistance(route.distance)} (${formatDuration(route.duration)})\n\n`;
-        } else if (isLast) {
-          // Check for cross-day route to next day's first location
-          const nextDayFirstLoc = getFirstLocationOfNextDay(day);
-          if (nextDayFirstLoc) {
-            const crossDayRoute = getRouteBetween(location, nextDayFirstLoc);
-            if (crossDayRoute) {
-              const emoji = crossDayRoute.isFlight ? "✈️" : "🌙";
-              const sortedDays = [...days].sort((a, b) => a - b);
-              const nextDay = sortedDays[sortedDays.indexOf(day) + 1];
-              content += `\n      ${emoji} To Day ${nextDay}: ${formatDistance(crossDayRoute.distance)} (${formatDuration(crossDayRoute.duration)})\n`;
-            }
+      sortedDays.forEach(day => {
+        const dayLocations = locationsByDay[day] || [];
+        if (dayLocations.length === 0) return;
+        
+        // Calculate day stats
+        let dayDistance = 0;
+        let dayDuration = 0;
+        dayLocations.forEach((loc, idx) => {
+          if (!loc) return;
+          const route = getRouteToNext(loc, dayLocations, idx);
+          if (route) {
+            dayDistance += route.distance || 0;
+            dayDuration += route.duration || 0;
           }
-          content += "\n";
-        } else {
-          content += "\n";
-        }
+        });
+
+        content += `───────────────────────────────────────\n`;
+        content += `📅 DAY ${day}\n`;
+        content += `   Distance: ${formatDistance(dayDistance)} | Duration: ${formatDuration(dayDuration)}\n`;
+        content += `───────────────────────────────────────\n\n`;
+
+        dayLocations.forEach((location, index) => {
+          if (!location) return;
+          
+          const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
+          const route = getRouteToNext(location, dayLocations, index);
+          const isLast = index === dayLocations.length - 1;
+
+          const locationName = location.name ? location.name.split(",")[0] : "Unknown Location";
+          content += `   ${globalIndex > 0 ? globalIndex : ''}. ${locationName}\n`;
+          if (location.description) {
+            content += `      ${location.description}\n`;
+          }
+          if (location.address) {
+            content += `      📍 ${location.address}\n`;
+          }
+          content += `      Type: ${location.type || "Location"}\n`;
+          if (location.coordinates?.lat && location.coordinates?.lng) {
+            content += `      Coordinates: ${location.coordinates.lat.toFixed(4)}, ${location.coordinates.lng.toFixed(4)}\n`;
+          }
+
+          if (route && !isLast) {
+            const emoji = route.isFlight ? "✈️" : "↓";
+            content += `\n      ${emoji} ${formatDistance(route.distance)} (${formatDuration(route.duration)})\n\n`;
+          } else if (isLast) {
+            // Check for cross-day route to next day's first location
+            const nextDayFirstLoc = getFirstLocationOfNextDay(day);
+            if (nextDayFirstLoc) {
+              const crossDayRoute = getRouteBetween(location, nextDayFirstLoc);
+              if (crossDayRoute) {
+                const emoji = crossDayRoute.isFlight ? "✈️" : "🌙";
+                const currentDayIndex = sortedDays.indexOf(day);
+                const nextDay = currentDayIndex >= 0 && currentDayIndex < sortedDays.length - 1 ? sortedDays[currentDayIndex + 1] : null;
+                if (nextDay) {
+                  content += `\n      ${emoji} To Day ${nextDay}: ${formatDistance(crossDayRoute.distance)} (${formatDuration(crossDayRoute.duration)})\n`;
+                }
+              }
+            }
+            content += "\n";
+          } else {
+            content += "\n";
+          }
+        });
+
+        content += "\n";
       });
 
-      content += "\n";
-    });
+      content += "═══════════════════════════════════════\n";
+      content += "  Generated by Voyage AI Trip Planner\n";
+      content += "═══════════════════════════════════════\n";
 
-    content += "═══════════════════════════════════════\n";
-    content += "  Generated by Voyage AI Trip Planner\n";
-    content += "═══════════════════════════════════════\n";
+      return content;
+    } catch (error) {
+      console.error("Error generating text content:", error);
+      return "Error generating itinerary. Please try again.";
+    }
+  }, [locations, sortedDays, locationsByDay, totalDistance, totalDuration, getRouteToNext, getRouteBetween, getFirstLocationOfNextDay, days]);
 
-    return content;
-  };
+  // Generate HTML content for printing (memoized)
+  const generateHTMLContent = useCallback(() => {
+    try {
+      // Escape HTML to prevent XSS
+      const escapeHtml = (text: string) => {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      };
 
-  // Generate HTML content for printing
-  const generateHTMLContent = () => {
-    return `
+      return `
 <!DOCTYPE html>
 <html>
 <head>
@@ -328,11 +340,11 @@ export function ExportItinerary({
 
   <div class="summary">
     <div class="summary-item">
-      <div class="value">${formatDistance(totalDistance)}</div>
+      <div class="value">${escapeHtml(formatDistance(totalDistance))}</div>
       <div class="label">Total Distance</div>
     </div>
     <div class="summary-item">
-      <div class="value">${formatDuration(totalDuration)}</div>
+      <div class="value">${escapeHtml(formatDuration(totalDuration))}</div>
       <div class="label">Total Duration</div>
     </div>
     <div class="summary-item">
@@ -345,8 +357,10 @@ export function ExportItinerary({
     </div>
   </div>
 
-  ${days.map(day => {
+  ${sortedDays.map(day => {
     const dayLocations = locationsByDay[day] || [];
+    if (dayLocations.length === 0) return '';
+    
     const dayColor = getDayColor(day).bg;
     
     // Calculate day stats
@@ -366,9 +380,11 @@ export function ExportItinerary({
     <div class="day">
       <div class="day-header" style="background: ${dayColor}">
         <h2>📅 Day ${day}</h2>
-        <div class="stats">${formatDistance(dayDistance)} • ${formatDuration(dayDuration)}</div>
+        <div class="stats">${escapeHtml(formatDistance(dayDistance))} • ${escapeHtml(formatDuration(dayDuration))}</div>
       </div>
       ${dayLocations.map((location, index) => {
+        if (!location) return '';
+        
         const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
         const route = index < dayLocations.length - 1 ? getRouteBetween(location, dayLocations[index + 1]) : null;
         const isLast = index === dayLocations.length - 1;
@@ -376,17 +392,16 @@ export function ExportItinerary({
         // Check for cross-day route if this is the last location
         let crossDayHtml = "";
         if (isLast) {
-          const sortedDays = [...days].sort((a, b) => a - b);
           const currentIndex = sortedDays.indexOf(day);
           if (currentIndex < sortedDays.length - 1) {
             const nextDay = sortedDays[currentIndex + 1];
             const nextDayLocs = locationsByDay[nextDay] || [];
-            if (nextDayLocs.length > 0) {
+            if (nextDayLocs.length > 0 && nextDayLocs[0]) {
               const crossDayRoute = getRouteBetween(location, nextDayLocs[0]);
               if (crossDayRoute) {
                 crossDayHtml = `
                   <div class="route-info" style="background: linear-gradient(to right, ${dayColor}22, #6366f122); border: 1px dashed ${dayColor}">
-                    🌙 To Day ${nextDay}: <strong>${formatDistance(crossDayRoute.distance)}</strong> (${formatDuration(crossDayRoute.duration)})
+                    🌙 To Day ${nextDay}: <strong>${escapeHtml(formatDistance(crossDayRoute.distance))}</strong> (${escapeHtml(formatDuration(crossDayRoute.duration))})
                   </div>
                 `;
               }
@@ -394,20 +409,25 @@ export function ExportItinerary({
           }
         }
 
+        const locationName = location.name ? escapeHtml(location.name.split(",")[0]) : 'Unknown Location';
+        const locationDesc = location.description ? `<div class="location-desc">${escapeHtml(location.description)}</div>` : "";
+        const locationAddr = location.address ? `<div class="location-address">📍 ${escapeHtml(location.address)}</div>` : "";
+        const routeHtml = route && !isLast ? `
+            <div class="route-info">
+              ↓ <strong>${escapeHtml(formatDistance(route.distance))}</strong> (${escapeHtml(formatDuration(route.duration))})
+            </div>
+          ` : crossDayHtml;
+
         return `
         <div class="location" style="border-left-color: ${dayColor}">
           <div class="location-header">
-            <div class="location-number" style="background: ${dayColor}">${globalIndex}</div>
-            <span class="location-name">${location.name.split(",")[0]}</span>
-            <span class="location-type">${location.type || "Location"}</span>
+            <div class="location-number" style="background: ${dayColor}">${globalIndex > 0 ? globalIndex : ''}</div>
+            <span class="location-name">${locationName}</span>
+            <span class="location-type">${escapeHtml(location.type || "Location")}</span>
           </div>
-          ${location.description ? `<div class="location-desc">${location.description}</div>` : ""}
-          ${location.address ? `<div class="location-address">📍 ${location.address}</div>` : ""}
-          ${route && !isLast ? `
-            <div class="route-info">
-              ↓ <strong>${formatDistance(route.distance)}</strong> (${formatDuration(route.duration)})
-            </div>
-          ` : crossDayHtml}
+          ${locationDesc}
+          ${locationAddr}
+          ${routeHtml}
         </div>
         `;
       }).join("")}
@@ -421,56 +441,76 @@ export function ExportItinerary({
 </body>
 </html>
     `;
-  };
+    } catch (error) {
+      console.error("Error generating HTML content:", error);
+      return "<html><body><h1>Error generating itinerary</h1></body></html>";
+    }
+  }, [locations, sortedDays, locationsByDay, totalDistance, totalDuration, getRouteBetween]);
 
   // Copy to clipboard
-  const handleCopyText = async () => {
-    const content = generateTextContent();
-    await navigator.clipboard.writeText(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  const handleCopyText = useCallback(async () => {
+    try {
+      const content = generateTextContent();
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy to clipboard:", error);
+    }
+  }, [generateTextContent]);
 
   // Download as text file
-  const handleDownloadText = () => {
-    const content = generateTextContent();
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `trip-itinerary-${new Date().toISOString().split("T")[0]}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+  const handleDownloadText = useCallback(() => {
+    try {
+      const content = generateTextContent();
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `trip-itinerary-${new Date().toISOString().split("T")[0]}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Failed to download text file:", error);
+    }
+  }, [generateTextContent]);
 
   // Open print preview with HTML
-  const handlePrint = () => {
-    const htmlContent = generateHTMLContent();
-    const printWindow = window.open("", "_blank");
-    if (printWindow) {
-      printWindow.document.write(htmlContent);
-      printWindow.document.close();
-      setTimeout(() => {
-        printWindow.print();
-      }, 250);
+  const handlePrint = useCallback(() => {
+    try {
+      const htmlContent = generateHTMLContent();
+      const printWindow = window.open("", "_blank");
+      if (printWindow) {
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        setTimeout(() => {
+          printWindow.print();
+        }, 250);
+      }
+    } catch (error) {
+      console.error("Failed to open print window:", error);
     }
-  };
+  }, [generateHTMLContent]);
 
   // Download as HTML file
-  const handleDownloadHTML = () => {
-    const htmlContent = generateHTMLContent();
-    const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `trip-itinerary-${new Date().toISOString().split("T")[0]}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+  const handleDownloadHTML = useCallback(() => {
+    try {
+      const htmlContent = generateHTMLContent();
+      const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `trip-itinerary-${new Date().toISOString().split("T")[0]}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Failed to download HTML file:", error);
+    }
+  }, [generateHTMLContent]);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">

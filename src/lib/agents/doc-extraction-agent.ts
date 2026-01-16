@@ -50,7 +50,7 @@ export class DocExtractionAgent extends BaseAgent {
       const imageData = this.getSharedMemory<{ base64: string; mimeType: string }>("imageData");
 
       if (!documentText && !imageData) {
-        return this.error("No document content available for extraction");
+        return this.error("No document content available for extraction") as TaskResult<DocExtractionResult>;
       }
 
       let extractedContent: string;
@@ -87,7 +87,7 @@ export class DocExtractionAgent extends BaseAgent {
       );
     } catch (error) {
       this.log("Extraction failed", error);
-      return this.error(`Document extraction failed: ${error}`);
+      return this.error(`Document extraction failed: ${error}`) as TaskResult<DocExtractionResult>;
     }
   }
 

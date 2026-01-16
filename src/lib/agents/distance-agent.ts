@@ -126,7 +126,7 @@ export class DistanceCalculationAgent extends BaseAgent {
         this.getSharedMemory<GeolocatedEntity[]>("geolocatedEntities");
 
       if (!entities || entities.length === 0) {
-        return this.error("No geolocated entities available for distance calculation");
+        return this.error("No geolocated entities available for distance calculation") as TaskResult<DistanceResult[]>;
       }
 
       // Filter entities that have valid coordinates
@@ -213,7 +213,7 @@ export class DistanceCalculationAgent extends BaseAgent {
       return this.success(distances, executionTime);
     } catch (error) {
       this.log("Distance calculation failed", error);
-      return this.error(`Distance calculation failed: ${error}`);
+      return this.error(`Distance calculation failed: ${error}`) as TaskResult<DistanceResult[]>;
     }
   }
 
