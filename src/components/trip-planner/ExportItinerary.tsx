@@ -50,20 +50,46 @@ export function ExportItinerary({
   const [exporting, setExporting] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
 
-  if (!isOpen) return null;
+  // Safety checks - memoized to prevent infinite loops
+  // IMPORTANT: All hooks must be called before any conditional returns
+  const safeLocations = useMemo(() => {
+    return Array.isArray(locations) ? locations.filter(l => l != null) : [];
+  }, [locations]);
+
+  const safeRoutes = useMemo(() => {
+    return Array.isArray(routes) ? routes : [];
+  }, [routes]);
+
+  const safeFlights = useMemo(() => {
+    return Array.isArray(flights) ? flights : [];
+  }, [flights]);
+
+  const safeDays = useMemo(() => {
+    return Array.isArray(days) && days.length > 0 ? days : [1];
+  }, [days]);
 
   // Sort days array (memoized)
   const sortedDays = useMemo(() => {
-    return [...days].sort((a, b) => a - b);
-  }, [days]);
+    try {
+      return [...safeDays].sort((a, b) => a - b);
+    } catch (error) {
+      console.error("Error sorting days:", error);
+      return [1];
+    }
+  }, [safeDays]);
 
   // Group locations by day (memoized)
   const locationsByDay = useMemo(() => {
-    return sortedDays.reduce((acc, day) => {
-      acc[day] = locations.filter(l => (l.day || 1) === day);
-      return acc;
-    }, {} as Record<number, TripLocation[]>);
-  }, [sortedDays, locations]);
+    try {
+      return sortedDays.reduce((acc, day) => {
+        acc[day] = safeLocations.filter(l => l && (l.day || 1) === day);
+        return acc;
+      }, {} as Record<number, TripLocation[]>);
+    } catch (error) {
+      console.error("Error grouping locations by day:", error);
+      return {} as Record<number, TripLocation[]>;
+    }
+  }, [sortedDays, safeLocations]);
 
   // Helper to get the first location of the next day (memoized)
   const getFirstLocationOfNextDay = useCallback((currentDay: number) => {
@@ -77,6 +103,11 @@ export function ExportItinerary({
 
   // Get route info between two consecutive locations
   const getRouteBetween = useCallback((fromLoc: TripLocation, toLoc: TripLocation) => {
+      // Safety checks
+      if (!fromLoc || !toLoc || !fromLoc.id || !toLoc.id) {
+        return null;
+      }
+
       // Check if these are flight departure/arrival locations
       // Flight locations have IDs like "flight-xxx-dep" and "flight-xxx-arr"
       if (fromLoc.id.includes('-dep') && toLoc.id.includes('-arr')) {
@@ -108,25 +139,32 @@ export function ExportItinerary({
       }
       
       // For regular locations, find matching land route
-      const fromIndex = locations.findIndex(l => l.id === fromLoc.id);
-      const toIndex = locations.findIndex(l => l.id === toLoc.id);
+      const fromIndex = safeLocations.findIndex(l => l && l.id === fromLoc.id);
+      const toIndex = safeLocations.findIndex(l => l && l.id === toLoc.id);
       
       // Check if they're consecutive in the locations array
-      if (toIndex === fromIndex + 1) {
+      if (fromIndex >= 0 && toIndex >= 0 && toIndex === fromIndex + 1) {
         // Find a land route that could connect these (by counting non-skipped pairs)
-        const landRoutes = routes.filter(r => !r.isFlight);
+        const landRoutes = safeRoutes.filter(r => r && !r.isFlight);
         let routeIndex = 0;
-        for (let i = 0; i < locations.length - 1; i++) {
-          const loc1 = locations[i];
-          const loc2 = locations[i + 1];
+        for (let i = 0; i < safeLocations.length - 1; i++) {
+          const loc1 = safeLocations[i];
+          const loc2 = safeLocations[i + 1];
+          
+          // Safety checks
+          if (!loc1 || !loc2 || !loc1.coordinates || !loc2.coordinates) continue;
           
           // Skip airports and different days (matching the skip logic in TripPlanner)
           if (loc1.type === 'airport' || loc2.type === 'airport') continue;
           if (loc1.day !== loc2.day) continue;
           
           // Check distance threshold
-          const dist = calculateDistance(loc1.coordinates, loc2.coordinates);
-          if (dist > 1000000) continue; // > 1000 km
+          try {
+            const dist = calculateDistance(loc1.coordinates, loc2.coordinates);
+            if (dist > 1000000 || !isFinite(dist)) continue; // > 1000 km or invalid
+          } catch (e) {
+            continue;
+          }
           
           if (i === fromIndex && routeIndex < landRoutes.length) {
             return { ...landRoutes[routeIndex], isFlight: false };
@@ -136,61 +174,76 @@ export function ExportItinerary({
       }
       
       // Fallback: calculate direct distance (only if same day)
-      if (fromLoc.day === toLoc.day) {
-        const directDistance = calculateDistance(fromLoc.coordinates, toLoc.coordinates);
-        if (directDistance !== Infinity && directDistance > 0 && directDistance <= 1000000) {
-          // Estimate land travel time (avg 60 km/h)
-          const duration = (directDistance / 1000) / 60 * 3600;
-          return { distance: directDistance, duration, isFlight: false };
+      if (fromLoc.day === toLoc.day && fromLoc.coordinates && toLoc.coordinates) {
+        try {
+          const directDistance = calculateDistance(fromLoc.coordinates, toLoc.coordinates);
+          if (isFinite(directDistance) && directDistance > 0 && directDistance <= 1000000) {
+            // Estimate land travel time (avg 60 km/h)
+            const duration = (directDistance / 1000) / 60 * 3600;
+            return { distance: directDistance, duration, isFlight: false };
+          }
+        } catch (e) {
+          // Ignore calculation errors
         }
       }
       
       return null;
-  }, [locations, routes, flights]);
+  }, [safeLocations, safeRoutes, safeFlights]);
 
   // Calculate total stats (including cross-day routes)
   const { totalDistance, totalDuration } = useMemo(() => {
     let distance = 0;
     let duration = 0;
     
-    // Calculate within-day routes
-    for (let i = 0; i < locations.length - 1; i++) {
-      const route = getRouteBetween(locations[i], locations[i + 1]);
-      if (route) {
-        distance += route.distance || 0;
-        duration += route.duration || 0;
+    try {
+      // Calculate within-day routes
+      for (let i = 0; i < safeLocations.length - 1; i++) {
+        const loc1 = safeLocations[i];
+        const loc2 = safeLocations[i + 1];
+        if (!loc1 || !loc2) continue;
+        
+        const route = getRouteBetween(loc1, loc2);
+        if (route) {
+          distance += route.distance || 0;
+          duration += route.duration || 0;
+        }
       }
-    }
     
-    // Add cross-day routes (last of day N to first of day N+1)
-    for (let i = 0; i < sortedDays.length - 1; i++) {
-      const currentDay = sortedDays[i];
-      const nextDay = sortedDays[i + 1];
-      
-      const currentDayLocs = locationsByDay[currentDay] || [];
-      const nextDayLocs = locationsByDay[nextDay] || [];
-      
-      if (currentDayLocs.length > 0 && nextDayLocs.length > 0) {
-        const lastOfCurrentDay = currentDayLocs[currentDayLocs.length - 1];
-        const firstOfNextDay = nextDayLocs[0];
+      // Add cross-day routes (last of day N to first of day N+1)
+      for (let i = 0; i < sortedDays.length - 1; i++) {
+        const currentDay = sortedDays[i];
+        const nextDay = sortedDays[i + 1];
         
-        // Only add if not already counted (same day locations are adjacent in locations array)
-        const lastIdx = locations.findIndex(l => l.id === lastOfCurrentDay.id);
-        const firstIdx = locations.findIndex(l => l.id === firstOfNextDay.id);
+        const currentDayLocs = locationsByDay[currentDay] || [];
+        const nextDayLocs = locationsByDay[nextDay] || [];
         
-        // If they're not adjacent in the array, we need to add this cross-day route
-        if (lastIdx !== -1 && firstIdx !== -1 && firstIdx !== lastIdx + 1) {
-          const crossDayRoute = getRouteBetween(lastOfCurrentDay, firstOfNextDay);
-          if (crossDayRoute) {
-            distance += crossDayRoute.distance || 0;
-            duration += crossDayRoute.duration || 0;
+        if (currentDayLocs.length > 0 && nextDayLocs.length > 0) {
+          const lastOfCurrentDay = currentDayLocs[currentDayLocs.length - 1];
+          const firstOfNextDay = nextDayLocs[0];
+          
+          if (!lastOfCurrentDay || !firstOfNextDay) continue;
+          
+          // Only add if not already counted (same day locations are adjacent in locations array)
+          const lastIdx = safeLocations.findIndex(l => l && l.id === lastOfCurrentDay.id);
+          const firstIdx = safeLocations.findIndex(l => l && l.id === firstOfNextDay.id);
+          
+          // If they're not adjacent in the array, we need to add this cross-day route
+          if (lastIdx !== -1 && firstIdx !== -1 && firstIdx !== lastIdx + 1) {
+            const crossDayRoute = getRouteBetween(lastOfCurrentDay, firstOfNextDay);
+            if (crossDayRoute) {
+              distance += crossDayRoute.distance || 0;
+              duration += crossDayRoute.duration || 0;
+            }
           }
         }
       }
+    } catch (error) {
+      console.error("Error calculating total stats:", error);
+      // Return safe defaults
     }
     
     return { totalDistance: distance, totalDuration: duration };
-  }, [locations, sortedDays, locationsByDay, getRouteBetween]);
+  }, [safeLocations, sortedDays, locationsByDay, getRouteBetween]);
 
   // Helper to get route to next location within the same day (memoized)
   const getRouteToNext = useCallback((location: TripLocation, dayLocations: TripLocation[], index: number) => {
@@ -208,8 +261,8 @@ export function ExportItinerary({
       content += `📊 Trip Summary\n`;
       content += `   Total Distance: ${formatDistance(totalDistance)}\n`;
       content += `   Total Duration: ${formatDuration(totalDuration)}\n`;
-      content += `   Total Stops: ${locations.length}\n`;
-      content += `   Days: ${days.length}\n\n`;
+      content += `   Total Stops: ${safeLocations.length}\n`;
+      content += `   Days: ${safeDays.length}\n\n`;
 
       sortedDays.forEach(day => {
         const dayLocations = locationsByDay[day] || [];
@@ -235,7 +288,7 @@ export function ExportItinerary({
         dayLocations.forEach((location, index) => {
           if (!location) return;
           
-          const globalIndex = locations.findIndex(l => l.id === location.id) + 1;
+          const globalIndex = safeLocations.findIndex(l => l && l.id === location.id) + 1;
           const route = getRouteToNext(location, dayLocations, index);
           const isLast = index === dayLocations.length - 1;
 
@@ -287,16 +340,35 @@ export function ExportItinerary({
       console.error("Error generating text content:", error);
       return "Error generating itinerary. Please try again.";
     }
-  }, [locations, sortedDays, locationsByDay, totalDistance, totalDuration, getRouteToNext, getRouteBetween, getFirstLocationOfNextDay, days]);
+  }, [safeLocations, sortedDays, locationsByDay, totalDistance, totalDuration, getRouteToNext, getRouteBetween, getFirstLocationOfNextDay, safeDays]);
 
   // Generate HTML content for printing (memoized)
   const generateHTMLContent = useCallback(() => {
     try {
+      // Check if we're in a browser environment
+      if (typeof document === 'undefined') {
+        return "<html><body><h1>Export not available in this environment</h1></body></html>";
+      }
+
       // Escape HTML to prevent XSS
       const escapeHtml = (text: string) => {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        if (!text) return '';
+        try {
+          const div = document.createElement('div');
+          div.textContent = String(text);
+          return div.innerHTML;
+        } catch (e) {
+          return String(text).replace(/[&<>"']/g, (m) => {
+            const map: Record<string, string> = {
+              '&': '&amp;',
+              '<': '&lt;',
+              '>': '&gt;',
+              '"': '&quot;',
+              "'": '&#39;'
+            };
+            return map[m] || m;
+          });
+        }
       };
 
       return `
@@ -348,11 +420,11 @@ export function ExportItinerary({
       <div class="label">Total Duration</div>
     </div>
     <div class="summary-item">
-      <div class="value">${locations.length}</div>
+      <div class="value">${safeLocations.length}</div>
       <div class="label">Stops</div>
     </div>
     <div class="summary-item">
-      <div class="value">${days.length}</div>
+      <div class="value">${safeDays.length}</div>
       <div class="label">Days</div>
     </div>
   </div>
@@ -462,6 +534,11 @@ export function ExportItinerary({
   // Download as text file
   const handleDownloadText = useCallback(() => {
     try {
+      if (typeof document === 'undefined' || typeof URL === 'undefined') {
+        console.error("Browser APIs not available");
+        return;
+      }
+      
       const content = generateTextContent();
       const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -474,29 +551,48 @@ export function ExportItinerary({
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error("Failed to download text file:", error);
+      alert("Failed to download text file. Please check the browser console for details.");
     }
   }, [generateTextContent]);
 
   // Open print preview with HTML
   const handlePrint = useCallback(() => {
     try {
+      if (typeof window === 'undefined') {
+        console.error("Window object not available");
+        return;
+      }
+      
       const htmlContent = generateHTMLContent();
       const printWindow = window.open("", "_blank");
       if (printWindow) {
         printWindow.document.write(htmlContent);
         printWindow.document.close();
         setTimeout(() => {
-          printWindow.print();
+          try {
+            printWindow.print();
+          } catch (printError) {
+            console.error("Failed to print:", printError);
+            alert("Failed to open print dialog. Please try downloading as HTML instead.");
+          }
         }, 250);
+      } else {
+        alert("Please allow pop-ups for this site to use the print feature.");
       }
     } catch (error) {
       console.error("Failed to open print window:", error);
+      alert("Failed to open print window. Please try downloading as HTML instead.");
     }
   }, [generateHTMLContent]);
 
   // Download as HTML file
   const handleDownloadHTML = useCallback(() => {
     try {
+      if (typeof document === 'undefined' || typeof URL === 'undefined') {
+        console.error("Browser APIs not available");
+        return;
+      }
+      
       const htmlContent = generateHTMLContent();
       const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -509,8 +605,12 @@ export function ExportItinerary({
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error("Failed to download HTML file:", error);
+      alert("Failed to download HTML file. Please check the browser console for details.");
     }
   }, [generateHTMLContent]);
+
+  // Early return AFTER all hooks have been called
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
@@ -545,11 +645,11 @@ export function ExportItinerary({
         <div className="p-4 bg-accent/30">
           <div className="grid grid-cols-4 gap-2 text-center">
             <div>
-              <div className="text-lg font-bold text-primary">{days.length}</div>
+              <div className="text-lg font-bold text-primary">{safeDays.length}</div>
               <div className="text-[10px] text-muted-foreground">Days</div>
             </div>
             <div>
-              <div className="text-lg font-bold text-primary">{locations.length}</div>
+              <div className="text-lg font-bold text-primary">{safeLocations.length}</div>
               <div className="text-[10px] text-muted-foreground">Stops</div>
             </div>
             <div>

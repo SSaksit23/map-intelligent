@@ -17,6 +17,7 @@ services:
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - API_NINJAS_KEY=${API_NINJAS_KEY}
+      - OPENROUTESERVICE_API_KEY=${OPENROUTESERVICE_API_KEY}
       - OSMNX_SERVICE_URL=http://routing-service:8001
     depends_on:
       - routing-service

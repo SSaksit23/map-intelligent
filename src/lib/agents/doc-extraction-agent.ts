@@ -92,7 +92,7 @@ export class DocExtractionAgent extends BaseAgent {
   }
 
   private async extractFromImage(base64Data: string, mimeType: string): Promise<string> {
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const prompt = `You are a travel document specialist. Analyze this image and extract ALL travel information.
 
@@ -152,7 +152,7 @@ Continue for ALL days. Extract EVERY location mentioned - users need complete it
   }
 
   private async parseEntities(text: string): Promise<Omit<DocExtractionResult, "rawText" | "documentType">> {
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const prompt = `You are an expert travel itinerary parser. Extract ALL travel information from this document.
 

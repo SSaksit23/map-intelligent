@@ -49,7 +49,7 @@ export function TripPlanner() {
   const [accommodationSuggestions, setAccommodationSuggestions] = useState<Map<string, AccommodationSuggestion[]>>(new Map());
   const [loadingAccommodations, setLoadingAccommodations] = useState<Set<string>>(new Set());
 
-  // Fetch route between two points using OSRM
+  // Fetch route between two points - tries local OSMnx service first, then falls back to OSRM
   const fetchRoute = useCallback(async (
     from: { lat: number; lng: number },
     to: { lat: number; lng: number }
@@ -68,56 +68,82 @@ export function TripPlanner() {
     }
 
     try {
-      // Add timeout to prevent hanging
+      // Try local API route which handles OpenRouteService + OSRM fallback
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // 45s timeout
 
-      const response = await fetch(
-        `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`,
-        { signal: controller.signal }
-      );
-      
+      const response = await fetch('/api/route', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          origin: { lat: from.lat, lng: from.lng },
+          destination: { lat: to.lat, lng: to.lng },
+          mode: 'drive'
+        }),
+        signal: controller.signal
+      });
+
       clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        console.warn("OSRM API error:", response.status);
-        // Return direct line as fallback
-        return {
-          coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
-          duration: 0,
-          distance: 0,
-        };
-      }
-      
-      const data = await response.json();
-      
-      if (data.routes?.[0]) {
-        return {
-          coordinates: data.routes[0].geometry.coordinates,
-          duration: data.routes[0].duration,
-          distance: data.routes[0].distance,
-        };
-      }
-      
-      // Return direct line as fallback if no route found
-      return {
-        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
-        duration: 0,
-        distance: 0,
-      };
-    } catch (error) {
-      // Handle network errors gracefully - return direct line
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.warn("Route fetch timeout");
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log("Route API response:", {
+          success: data.success,
+          distance_km: data.distance_km,
+          duration_minutes: data.duration_minutes,
+          hasCoordinates: !!data.path_coordinates,
+          coordinatesLength: data.path_coordinates?.length || 0
+        });
+        
+        if (data.path_coordinates && data.path_coordinates.length > 0) {
+          console.log("✓ Using road route:", data.distance_km?.toFixed(1), "km,", data.duration_minutes?.toFixed(0), "min");
+          return {
+            coordinates: data.path_coordinates,
+            duration: (data.duration_minutes || 0) * 60, // Convert minutes to seconds
+            distance: (data.distance_km || 0) * 1000, // Convert km to meters
+          };
+        } else {
+          console.warn("Route API returned no coordinates, data:", data);
+        }
       } else {
-        console.warn("Route fetch error (using direct line):", error);
+        console.warn("Route API returned error status:", response.status);
       }
-      return {
-        coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
-        duration: 0,
-        distance: 0,
-      };
+      
+      // If API route fails, calculate Haversine distance as fallback
+      console.warn("⚠ Route API failed, using Haversine fallback");
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn("Route fetch timeout, using Haversine fallback");
+      } else {
+        console.warn("Route fetch error:", error);
+      }
     }
+
+    // Haversine fallback - calculate direct distance and estimate road distance
+    const R = 6371000; // Earth's radius in meters
+    const lat1 = (from.lat * Math.PI) / 180;
+    const lat2 = (to.lat * Math.PI) / 180;
+    const dLat = ((to.lat - from.lat) * Math.PI) / 180;
+    const dLng = ((to.lng - from.lng) * Math.PI) / 180;
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const directDistance = R * c;
+
+    // Roads are typically ~1.4x direct distance
+    const roadDistance = directDistance * 1.4;
+    // Estimate 60 km/h average speed
+    const duration = (roadDistance / 1000) / 60 * 3600; // seconds
+
+    console.log("Using Haversine fallback:", (roadDistance / 1000).toFixed(1), "km");
+    
+    return {
+      coordinates: [[from.lng, from.lat], [to.lng, to.lat]],
+      duration: duration,
+      distance: roadDistance,
+    };
   }, []);
 
   // Calculate routes for all locations (preserving flight routes)

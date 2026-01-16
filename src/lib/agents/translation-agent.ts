@@ -116,7 +116,7 @@ export class TranslationAgent extends BaseAgent {
     // Sample some entity names
     const sampleNames = entities.slice(0, 5).map((e) => e.name).join(", ");
 
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const prompt = `Detect the primary language of these location names:
 "${sampleNames}"
@@ -148,7 +148,7 @@ Respond with ONLY the language name in English (e.g., "Chinese", "Thai", "Japane
       }));
     }
 
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     // Batch translate for efficiency
     const entityNames = entities.map((e) => e.name);
@@ -216,7 +216,7 @@ IMPORTANT:
     entity: ExtractedEntity,
     sourceLanguage: string
   ): Promise<TranslatedEntity> {
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const prompt = `Translate this ${sourceLanguage} location name to English:
 "${entity.name}"
@@ -265,7 +265,7 @@ Respond in JSON:
     // But airport names might need translation
     if (flights.length === 0) return [];
 
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const airportNames = flights
       .flatMap((f) => [f.departureAirport, f.arrivalAirport])
@@ -309,7 +309,7 @@ Respond in JSON:
   private async translateTrains(trains: ExtractedTrain[]): Promise<ExtractedTrain[]> {
     if (trains.length === 0) return [];
 
-    const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const stationNames = trains
       .flatMap((t) => [t.departureStation, t.arrivalStation])

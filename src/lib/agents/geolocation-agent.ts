@@ -539,7 +539,7 @@ export class GeolocationAgent extends BaseAgent {
     if (!this.genAI) return null;
 
     try {
-      const model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const model = this.genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
       const locationName = standardizedName || entity.name;
 
