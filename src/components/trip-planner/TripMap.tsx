@@ -371,23 +371,23 @@ export function TripMap({
       >
         <MapControls position="bottom-right" showZoom showLocate showFullscreen />
 
-        {/* Render land routes with day-based colors */}
+        {/* Render land routes with day-based colors - solid lines following roads */}
         {filteredRoutes.map(({ route, pair, index }) => {
           // Use route.isCrossDay or route.isOvernight - both indicate overnight routes
           const isOvernight = route.isCrossDay || route.isOvernight;
           // For overnight routes, use fromDay; for normal routes, use pair's day
           const routeDay = isOvernight ? (route.fromDay || 1) : (pair?.startLoc.day || 1);
-          // Use gray (#6b7280) for overnight routes as suggested in the guide, purple for visual distinction
+          // Use purple for overnight routes, day color otherwise
           const routeColor = isOvernight ? "#8b5cf6" : getDayColor(routeDay).bg;
           
           return (
             <MapRoute
               key={`route-${index}`}
               coordinates={route.coordinates}
-              color={routeColor} // Purple/violet for overnight, day color otherwise
-              width={isOvernight ? 3 : 4}
-              opacity={isOvernight ? 0.7 : 0.8}
-              dashArray={isOvernight ? [8, 6] : undefined} // Dashed line for overnight routes
+              color={routeColor}
+              width={4}
+              opacity={0.85}
+              // All routes use solid lines (no dashArray)
             />
           );
         })}

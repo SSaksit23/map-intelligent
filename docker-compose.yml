@@ -19,6 +19,7 @@ services:
       - API_NINJAS_KEY=${API_NINJAS_KEY}
       - OPENROUTESERVICE_API_KEY=${OPENROUTESERVICE_API_KEY}
       - OSMNX_SERVICE_URL=http://routing-service:8001
+      - ROUTING_SERVICE_URL=http://routing-service:8001
     depends_on:
       - routing-service
     volumes:

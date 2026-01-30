@@ -9,16 +9,21 @@ Features:
 - Calculates shortest paths for driving, walking, biking
 - Returns accurate distances and travel times
 - Supports batch route calculations
+- PDF text extraction using PyMuPDF
 """
 
 import os
+import io
 import logging
+import base64
 from typing import Optional, List, Literal
 from contextlib import asynccontextmanager
 
 import osmnx as ox
 import networkx as nx
-from fastapi import FastAPI, HTTPException
+import fitz  # PyMuPDF
+import docx  # python-docx
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from cachetools import TTLCache
@@ -370,6 +375,222 @@ async def preload_graph(lat: float, lng: float, mode: str = "drive", radius: int
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ PDF Extraction ============
+
+class DocumentExtractRequest(BaseModel):
+    """Request model for base64 document extraction."""
+    data_base64: str
+    filename: Optional[str] = "document"
+    file_type: Literal["pdf", "docx"] = "pdf"
+
+
+class DocumentExtractResponse(BaseModel):
+    """Response model for document extraction."""
+    text: str
+    page_count: int
+    success: bool = True
+    error: Optional[str] = None
+
+
+# Keep old models for backward compatibility
+class PDFExtractRequest(BaseModel):
+    """Request model for base64 PDF extraction."""
+    pdf_base64: str
+    filename: Optional[str] = "document.pdf"
+
+
+class PDFExtractResponse(BaseModel):
+    """Response model for PDF extraction."""
+    text: str
+    page_count: int
+    success: bool = True
+    error: Optional[str] = None
+
+
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> tuple[str, int]:
+    """
+    Extract text from PDF bytes using PyMuPDF.
+    Fast extraction optimized for multi-language documents (EN, CN, TH).
+    
+    Returns:
+        tuple: (extracted_text, page_count)
+    """
+    text_parts = []
+    
+    # Open PDF from bytes
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_count = len(doc)
+    
+    for page_num, page in enumerate(doc):
+        # Extract text with better unicode support for Chinese/Thai
+        page_text = page.get_text("text", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        if page_text.strip():
+            text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+    
+    doc.close()
+    
+    return "\n\n".join(text_parts), page_count
+
+
+def extract_text_from_docx_bytes(docx_bytes: bytes) -> tuple[str, int]:
+    """
+    Extract text from DOCX bytes using python-docx.
+    Fast extraction optimized for multi-language documents (EN, CN, TH).
+    
+    Returns:
+        tuple: (extracted_text, paragraph_count)
+    """
+    text_parts = []
+    
+    # Open DOCX from bytes
+    doc = docx.Document(io.BytesIO(docx_bytes))
+    
+    # Extract text from paragraphs
+    for para in doc.paragraphs:
+        if para.text.strip():
+            text_parts.append(para.text)
+    
+    # Also extract from tables
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = []
+            for cell in row.cells:
+                if cell.text.strip():
+                    row_text.append(cell.text.strip())
+            if row_text:
+                text_parts.append(" | ".join(row_text))
+    
+    return "\n".join(text_parts), len(doc.paragraphs)
+
+
+@app.post("/extract-document", response_model=DocumentExtractResponse)
+async def extract_document_text(request: DocumentExtractRequest):
+    """
+    Extract text from a base64-encoded document (PDF or DOCX).
+    
+    Fast text extraction optimized for English, Chinese, and Thai.
+    """
+    try:
+        logger.info(f"Extracting text from {request.file_type}: {request.filename}")
+        
+        # Decode base64
+        try:
+            doc_bytes = base64.b64decode(request.data_base64)
+        except Exception as e:
+            return DocumentExtractResponse(
+                text="",
+                page_count=0,
+                success=False,
+                error=f"Invalid base64 data: {str(e)}"
+            )
+        
+        # Extract text based on file type
+        if request.file_type == "pdf":
+            text, page_count = extract_text_from_pdf_bytes(doc_bytes)
+        elif request.file_type == "docx":
+            text, page_count = extract_text_from_docx_bytes(doc_bytes)
+        else:
+            return DocumentExtractResponse(
+                text="",
+                page_count=0,
+                success=False,
+                error=f"Unsupported file type: {request.file_type}"
+            )
+        
+        logger.info(f"Extracted {len(text)} characters from {page_count} pages/paragraphs")
+        
+        return DocumentExtractResponse(
+            text=text,
+            page_count=page_count,
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Document extraction error: {e}")
+        return DocumentExtractResponse(
+            text="",
+            page_count=0,
+            success=False,
+            error=str(e)
+        )
+
+
+@app.post("/extract-pdf", response_model=PDFExtractResponse)
+async def extract_pdf_text(request: PDFExtractRequest):
+    """
+    Extract text from a base64-encoded PDF.
+    
+    Fast text extraction using PyMuPDF (fitz).
+    """
+    try:
+        logger.info(f"Extracting text from PDF: {request.filename}")
+        
+        # Decode base64
+        try:
+            pdf_bytes = base64.b64decode(request.pdf_base64)
+        except Exception as e:
+            return PDFExtractResponse(
+                text="",
+                page_count=0,
+                success=False,
+                error=f"Invalid base64 data: {str(e)}"
+            )
+        
+        # Extract text
+        text, page_count = extract_text_from_pdf_bytes(pdf_bytes)
+        
+        logger.info(f"Extracted {len(text)} characters from {page_count} pages")
+        
+        return PDFExtractResponse(
+            text=text,
+            page_count=page_count,
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"PDF extraction error: {e}")
+        return PDFExtractResponse(
+            text="",
+            page_count=0,
+            success=False,
+            error=str(e)
+        )
+
+
+@app.post("/extract-pdf-upload", response_model=PDFExtractResponse)
+async def extract_pdf_upload(file: UploadFile = File(...)):
+    """
+    Extract text from an uploaded PDF file.
+    
+    Alternative endpoint that accepts file upload directly.
+    """
+    try:
+        logger.info(f"Extracting text from uploaded PDF: {file.filename}")
+        
+        # Read file content
+        pdf_bytes = await file.read()
+        
+        # Extract text
+        text, page_count = extract_text_from_pdf_bytes(pdf_bytes)
+        
+        logger.info(f"Extracted {len(text)} characters from {page_count} pages")
+        
+        return PDFExtractResponse(
+            text=text,
+            page_count=page_count,
+            success=True
+        )
+        
+    except Exception as e:
+        logger.error(f"PDF extraction error: {e}")
+        return PDFExtractResponse(
+            text="",
+            page_count=0,
+            success=False,
+            error=str(e)
+        )
 
 
 if __name__ == "__main__":

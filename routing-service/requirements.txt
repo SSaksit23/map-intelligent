@@ -26,3 +26,8 @@ aiohttp==3.9.1
 # Utilities
 python-dotenv==1.0.0
 numpy==1.26.3
+
+# Document extraction
+pymupdf==1.24.0
+python-multipart==0.0.9
+python-docx==1.1.0

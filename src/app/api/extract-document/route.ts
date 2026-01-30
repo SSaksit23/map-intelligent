@@ -1,45 +1,62 @@
 /**
  * Document Extraction API Route
- * Uses CrewAI-inspired multi-agent system:
- * 1. DocExtractionAgent - Extracts text and entities from documents
- * 2. GeolocationAgent - Finds coordinates for locations
- * 3. DistanceCalculationAgent - Calculates routes and distances
+ * Fast extraction using:
+ * 1. PyMuPDF (Python) for PDF text extraction
+ * 2. python-docx (Python) for Word text extraction  
+ * 3. Single Gemini call for entity extraction + translation
  */
 
 import { NextResponse } from "next/server";
-import mammoth from "mammoth";
-import { CrewOrchestrator } from "@/lib/agents";
+import { fastExtract, fastExtractFromImage } from "./fast-extract";
 
-// Dynamic import for pdf-parse to avoid ESM issues
-let pdfParse: ((buffer: Buffer) => Promise<{ text: string }>) | null = null;
+// Python service URL for document extraction
+const ROUTING_SERVICE_URL = process.env.ROUTING_SERVICE_URL || "http://routing-service:8001";
 
-// Helper function to extract text from PDF
-async function extractFromPDF(buffer: Buffer): Promise<string> {
+// Helper function to extract text from documents using Python service
+async function extractTextFromDocument(
+  buffer: Buffer, 
+  fileType: "pdf" | "docx"
+): Promise<string> {
+  console.log(`[API] Extracting text from ${fileType.toUpperCase()} using Python service...`);
+  
+  const base64Data = buffer.toString("base64");
+  
   try {
-    if (!pdfParse) {
-      const pdfModule = await import("pdf-parse");
-      pdfParse = pdfModule.default || pdfModule;
+    const response = await fetch(`${ROUTING_SERVICE_URL}/extract-document`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        data_base64: base64Data,
+        filename: `document.${fileType}`,
+        file_type: fileType,
+      }),
+      signal: AbortSignal.timeout(15000), // 15 second timeout
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Python service error: ${response.status} - ${errorText}`);
     }
-    const data = await pdfParse(buffer);
-    return data.text;
-  } catch (error) {
-    console.error("PDF extraction error:", error);
-    throw new Error("Failed to extract text from PDF");
-  }
-}
 
-// Helper function to extract text from Word document
-async function extractFromWord(buffer: Buffer): Promise<string> {
-  try {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value;
+    const result = await response.json();
+    
+    if (!result.success) {
+      throw new Error(result.error || "Document extraction failed");
+    }
+
+    console.log(`[API] Extracted ${result.text.length} chars from ${result.page_count} pages/paragraphs`);
+    return result.text;
+    
   } catch (error) {
-    console.error("Word extraction error:", error);
-    throw new Error("Failed to extract text from Word document");
+    console.error("[API] Document extraction error:", error);
+    throw new Error(`Failed to extract text: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 export async function POST(request: Request) {
+  const startTime = Date.now();
   console.log("[API] Document extraction request received");
   
   try {
@@ -68,37 +85,28 @@ export async function POST(request: Request) {
     const fileName = file.name.toLowerCase();
     const mimeType = file.type;
 
-    // Prepare input for the crew
+    // Variables for extraction
     let documentText: string | undefined;
     let imageData: { base64: string; mimeType: string } | undefined;
-    let documentType = "text";
 
-    // Handle different file types
+    // Handle different file types - use Python service for PDF/DOCX
     if (fileName.endsWith(".pdf") || mimeType === "application/pdf") {
       console.log("[API] Extracting text from PDF");
-      documentText = await extractFromPDF(buffer);
-      documentType = "pdf";
+      documentText = await extractTextFromDocument(buffer, "pdf");
     } else if (
       fileName.endsWith(".docx") ||
       mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ) {
       console.log("[API] Extracting text from DOCX");
-      documentText = await extractFromWord(buffer);
-      documentType = "docx";
+      documentText = await extractTextFromDocument(buffer, "docx");
     } else if (
       fileName.endsWith(".doc") ||
       mimeType === "application/msword"
     ) {
-      console.log("[API] Extracting text from DOC");
-      try {
-        documentText = await extractFromWord(buffer);
-        documentType = "doc";
-      } catch {
-        return NextResponse.json(
-          { error: "Old .doc format not fully supported. Please convert to .docx" },
-          { status: 400 }
-        );
-      }
+      return NextResponse.json(
+        { error: "Old .doc format not supported. Please convert to .docx" },
+        { status: 400 }
+      );
     } else if (
       mimeType.startsWith("image/") ||
       fileName.endsWith(".png") ||
@@ -112,7 +120,6 @@ export async function POST(request: Request) {
         base64: buffer.toString("base64"),
         mimeType: mimeType || "image/jpeg",
       };
-      documentType = "image";
     } else {
       return NextResponse.json(
         { error: "Unsupported file type. Please upload PDF, Word (.docx), or image files." },
@@ -140,59 +147,64 @@ export async function POST(request: Request) {
       documentText = `[User Context: ${context}]\n\n${documentText}`;
     }
 
-    console.log("[API] Initializing CrewOrchestrator with agents");
+    const textExtractionTime = Date.now() - startTime;
+    console.log(`[API] Text extraction complete in ${textExtractionTime}ms`);
 
-    // Create the crew orchestrator
-    const crew = new CrewOrchestrator({
-      apiKeys: {
-        gemini: process.env.GEMINI_API_KEY,
-        apiNinjas: process.env.API_NINJAS_KEY,
-      },
-      verbose: true,
-    });
-
-    // Process document through the agent pipeline
-    console.log("[API] Starting agent pipeline execution");
-    console.log("[API] Input data:", { 
-      hasText: !!documentText, 
-      textLength: documentText?.length || 0,
-      hasImage: !!imageData,
-      documentType 
-    });
+    // Use fast extraction (single Gemini call)
+    console.log("[API] Starting fast AI extraction...");
     
     let result;
     try {
-      result = await crew.processDocument({
-        text: documentText,
-        imageData,
-        documentType,
-      });
-    } catch (crewError) {
-      console.error("[API] Crew execution error:", crewError);
+      if (imageData) {
+        result = await fastExtractFromImage(
+          imageData.base64,
+          imageData.mimeType,
+          process.env.GEMINI_API_KEY
+        );
+      } else {
+        result = await fastExtract(
+          documentText!,
+          process.env.GEMINI_API_KEY
+        );
+      }
+    } catch (extractError) {
+      console.error("[API] Fast extraction error:", extractError);
       return NextResponse.json(
-        { error: "Agent pipeline failed", details: String(crewError) },
+        { error: "AI extraction failed", details: String(extractError) },
         { status: 500 }
       );
     }
 
-    console.log("[API] Agent pipeline complete", {
+    const totalTime = Date.now() - startTime;
+    console.log(`[API] Extraction complete in ${totalTime}ms`, {
       locations: result.locations.length,
       flights: result.flights.length,
       trains: result.trains.length,
-      distances: result.distances.length,
-      message: result.message,
     });
 
-    // Return the result in the expected format
+    // Transform locations to expected format
+    const locations = result.locations.map((loc, index) => ({
+      name: loc.name,
+      description: loc.description || "",
+      address: "",
+      coordinates: loc.coordinates || { lat: 0, lng: 0 },
+      type: loc.type,
+      day: loc.day,
+      order: index,
+    }));
+
+    // Generate summary message
+    const message = generateMessage(result);
+
+    // Return the result
     return NextResponse.json({
-      locations: result.locations,
+      locations,
       flights: result.flights,
       trains: result.trains,
       tripType: result.tripType,
       estimatedDays: result.estimatedDays,
-      message: result.message,
-      // Include distances for potential future use
-      _distances: result.distances,
+      message,
+      _extractionTimeMs: totalTime,
     });
 
   } catch (error) {
@@ -205,4 +217,43 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   }
+}
+
+function generateMessage(result: { 
+  locations: { type: string; name: string }[];
+  flights: unknown[];
+  trains: unknown[];
+  detectedLanguage: string;
+}): string {
+  const parts: string[] = [];
+
+  if (result.locations.length > 0) {
+    const cities = result.locations.filter(l => l.type === "city").length;
+    const attractions = result.locations.filter(l => l.type === "attraction").length;
+    const hotels = result.locations.filter(l => l.type === "hotel").length;
+
+    if (cities > 0) parts.push(`${cities} cit${cities > 1 ? "ies" : "y"}`);
+    if (attractions > 0) parts.push(`${attractions} attraction${attractions > 1 ? "s" : ""}`);
+    if (hotels > 0) parts.push(`${hotels} hotel${hotels > 1 ? "s" : ""}`);
+  }
+
+  if (result.flights.length > 0) {
+    parts.push(`${result.flights.length} flight${result.flights.length > 1 ? "s" : ""}`);
+  }
+
+  if (result.trains.length > 0) {
+    parts.push(`${result.trains.length} train${result.trains.length > 1 ? "s" : ""}`);
+  }
+
+  if (parts.length === 0) {
+    return "Document processed. No travel information found.";
+  }
+
+  const langNote = result.detectedLanguage && 
+    result.detectedLanguage !== "English" && 
+    result.detectedLanguage !== "Unknown"
+    ? ` (from ${result.detectedLanguage})`
+    : "";
+
+  return `Extracted: ${parts.join(", ")}${langNote}`;
 }
